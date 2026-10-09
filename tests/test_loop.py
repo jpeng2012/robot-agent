@@ -156,3 +156,19 @@ def test_trace_is_valid_jsonl(tmp_path):
     assert records[0]["event"] == "episode_start" and records[-1]["event"] == "episode_end"
     assert {"llm_turn", "tool_call", "env_outcome", "verify", "retry", "tool_result",
             "goal_check"} <= {r["event"] for r in records}
+
+
+def test_text_only_turn_is_nudged_once(tmp_path):
+    llm = ScriptedLLM([
+        [call("pick", object_id="cube_red", x=0.10, y=-0.20)],
+        [],  # narrates without calling a tool
+        [call("place", x=-0.20, y=0.15)],
+        [call("finish", summary="done")],
+    ])
+    result, _, events = run(tmp_path, llm=llm)
+    assert result.success and len(of(events, "nudge")) == 1
+
+
+def test_two_consecutive_text_only_turns_stop(tmp_path):
+    result, _, events = run(tmp_path, llm=ScriptedLLM([[call("observe")]]))
+    assert result.reason == "llm_stopped" and len(of(events, "nudge")) == 1

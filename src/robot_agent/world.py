@@ -50,6 +50,7 @@ class FailureCode(StrEnum):
     GRASP_SLIP = "GRASP_SLIP"
     POSTCONDITION_FAILED = "POSTCONDITION_FAILED"
     GOAL_NOT_MET = "GOAL_NOT_MET"
+    SKIPPED = "SKIPPED"  # not executed: an earlier call in the same turn failed
 
 
 # Failures that are safe to retry with identical arguments (if preconditions still hold).
