@@ -2,6 +2,7 @@
 
 from enum import StrEnum
 import math
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -67,3 +68,4 @@ class SkillOutcome(BaseModel):
 
     ok: bool
     failure: Failure | None = None
+    info: dict[str, Any] = {}  # backend diagnostics (controller steps, termination, ...), traced verbatim

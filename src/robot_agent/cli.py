@@ -4,7 +4,7 @@ import argparse
 import json
 
 from robot_agent.env import Faults, MockTabletopEnv
-from robot_agent.goals import pick_place_task
+from robot_agent.goals import pick_place_task, region_pick_place_task
 from robot_agent.llm import OllamaLLMClient, PickPlacePolicyLLM, ScriptedLLM, call
 from robot_agent.loop import AgentLoop
 from robot_agent.world import FailureCode
@@ -22,6 +22,8 @@ def make_llm(a: argparse.Namespace):
     if a.backend == "ollama":
         return OllamaLLMClient(model=a.model, base_url=a.base_url, think=a.think, temperature=a.temperature)
     if a.backend == "policy":
+        if a.env == "robosuite":
+            return PickPlacePolicyLLM("cube_red", "target", tol=0.02)
         return PickPlacePolicyLLM("cube_red", "plate")
     if a.scenario == "premature_finish":
         return ScriptedLLM([[call("observe")], [call("finish", summary="done")]])
@@ -48,14 +50,30 @@ def main() -> None:
     ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--trace-dir", default="traces")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--env", choices=["mock", "robosuite"], default="mock")
+    ap.add_argument("--robosuite-python", help="interpreter with robosuite (default: $ROBOT_AGENT_ROBOSUITE_PYTHON)")
+    ap.add_argument("--render", action="store_true", help="robosuite on-screen viewer")
     a = ap.parse_args()
-    for i in range(a.repeat):
-        loop = AgentLoop(MockTabletopEnv(SCENARIOS[a.scenario]()), make_llm(a), trace_dir=a.trace_dir,
-                         max_turns=a.max_turns, max_retries=a.max_retries, max_failures=a.max_failures)
-        result = loop.run(pick_place_task(), seed=a.seed + i)
-        label = {"backend": a.backend, "model": a.model if a.backend == "ollama" else None,
-                 "think": a.think if a.backend == "ollama" else None, "scenario": a.scenario}
-        print(json.dumps({**label, **result.model_dump(mode="json")}))
+    if a.env == "robosuite" and (a.scenario != "happy" or a.backend == "scripted"):
+        ap.error("--env robosuite supports --scenario happy with --backend policy or ollama")
+    robosuite_env = None
+    if a.env == "robosuite":
+        from robot_agent.robosuite_env import RobosuiteEnv
+
+        robosuite_env = RobosuiteEnv(python=a.robosuite_python, render=a.render)
+    task = region_pick_place_task() if a.env == "robosuite" else pick_place_task()
+    try:
+        for i in range(a.repeat):
+            env = robosuite_env or MockTabletopEnv(SCENARIOS[a.scenario]())
+            loop = AgentLoop(env, make_llm(a), trace_dir=a.trace_dir,
+                             max_turns=a.max_turns, max_retries=a.max_retries, max_failures=a.max_failures)
+            result = loop.run(task, seed=a.seed + i)
+            label = {"env": a.env, "backend": a.backend, "model": a.model if a.backend == "ollama" else None,
+                     "think": a.think if a.backend == "ollama" else None, "scenario": a.scenario}
+            print(json.dumps({**label, **result.model_dump(mode="json")}))
+    finally:
+        if robosuite_env is not None:
+            robosuite_env.close()
 
 
 if __name__ == "__main__":
