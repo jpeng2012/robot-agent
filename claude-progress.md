@@ -7,6 +7,7 @@
 - Created claude-progress.md for session continuity
 - Added init.sh for automated startup verification
 - Documented test commands and baseline verification results
+- Added README.md with project documentation and onboarding guide
 
 ### Verification
 ```bash
@@ -27,7 +28,6 @@
 
 ### Known Limitations
 - 5 tests skipped due to external dependencies (1 Ollama server, 4 robosuite)
-- No README documenting public API and setup instructions
 - Trace data (83 episodes) not version controlled
 
 ---
