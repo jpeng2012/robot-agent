@@ -1,0 +1,109 @@
+{
+  "features": [
+    {
+      "id": "F001",
+      "title": "Mock tabletop environment with deterministic kinematics",
+      "status": "complete",
+      "acceptance": [
+        "test_env.py passes (3/3 tests)",
+        "Supports fault injection scenarios",
+        "Coordinates match z=0 resting convention"
+      ],
+      "verification": "pytest tests/test_env.py -v",
+      "notes": "Baseline feature from initial commit (719d248)"
+    },
+    {
+      "id": "F002",
+      "title": "Agent control loop with bounded retry and goal verification",
+      "status": "complete",
+      "acceptance": [
+        "test_loop.py passes (20/20 tests)",
+        "Retry budget enforced for transient failures",
+        "Independent goal checking after finish skill",
+        "Full JSONL trace logging"
+      ],
+      "verification": "pytest tests/test_loop.py -v",
+      "notes": "Core closed-loop architecture"
+    },
+    {
+      "id": "F003",
+      "title": "Ollama LLM backend with temperature and thinking support",
+      "status": "complete",
+      "acceptance": [
+        "test_ollama_client.py passes (6/7 tests, 1 skip requires server)",
+        "OpenAI-compatible HTTP client",
+        "Qwen3 thinking mode (optional)",
+        "CLI integration with --model, --base-url, --think"
+      ],
+      "verification": "pytest tests/test_ollama_client.py -v -k 'not requires_server'",
+      "notes": "Commit 8a6d228. Skipped test requires live Ollama at localhost:11434"
+    },
+    {
+      "id": "F004",
+      "title": "Robosuite physics backend via subprocess bridge",
+      "status": "complete",
+      "acceptance": [
+        "test_robosuite_env.py passes (7/11 tests, 4 skip requires robosuite)",
+        "Python 3.10 worker isolation",
+        "Coordinate frame alignment (z=0 at rest)",
+        "OSC controller at 10Hz",
+        "Region-based goal checking"
+      ],
+      "verification": "pytest tests/test_robosuite_env.py -v -k 'not requires_robosuite'",
+      "notes": "Commit 45cd36b. Full verification requires robosuite installation"
+    },
+    {
+      "id": "F005",
+      "title": "Skill schema generation and validation",
+      "status": "complete",
+      "acceptance": [
+        "test_skills.py passes (3/3 tests)",
+        "JSON Schema for tool calling",
+        "Pydantic strict validation",
+        "Pre/post-condition checking"
+      ],
+      "verification": "pytest tests/test_skills.py -v",
+      "notes": "Core skill infrastructure"
+    },
+    {
+      "id": "F006",
+      "title": "Verified pick execution with postcondition checking",
+      "status": "planned",
+      "acceptance": [
+        "Postcondition _pick_post verifies after.gripper.holding == object_id",
+        "Precondition _pick_pre validates object is within GRASP_TOL of commanded pose",
+        "Fault injection tests demonstrate postcondition catches execution failures",
+        "test_loop.py::test_failed_pick_recovers_by_bounded_retry passes"
+      ],
+      "verification": "pytest tests/test_loop.py::test_failed_pick_recovers_by_bounded_retry -v",
+      "notes": "Pick postcondition exists (skills.py:67-73) but needs explicit acceptance test demonstrating verification catches real faults"
+    }
+  ],
+  "backlog": [
+    {
+      "id": "B001",
+      "title": "Full Ollama integration testing",
+      "status": "blocked",
+      "acceptance": [
+        "All test_ollama_client.py tests pass including server tests",
+        "Document Ollama setup in README"
+      ],
+      "blockers": "Requires Ollama server at localhost:11434"
+    },
+    {
+      "id": "B002",
+      "title": "Full robosuite integration testing",
+      "status": "blocked",
+      "acceptance": [
+        "All test_robosuite_env.py tests pass",
+        "Document robosuite setup (Python 3.10, MuJoCo license)"
+      ],
+      "blockers": "Requires robosuite installation and Python 3.10 environment"
+    }
+  ],
+  "meta": {
+    "last_updated": "2026-11-07",
+    "baseline_commit": "45cd36b",
+    "baseline_test_status": "39 passed, 5 skipped in 0.16s"
+  }
+}
