@@ -208,7 +208,7 @@ def test_pick_postcondition_catches_false_success(tmp_path):
 
 
 def test_inconsistent_state_holding_without_contact(tmp_path):
-    """Characterization test: Does verifier accept gripper.holding when object pose is incompatible?"""
+    """Spatial consistency check rejects object far from gripper."""
     from robot_agent.env import CARRY_Z
     from robot_agent.world import SkillOutcome
 
@@ -220,7 +220,7 @@ def test_inconsistent_state_holding_without_contact(tmp_path):
             self.holding = oid
             self.gripper = Pose(x=x, y=y, z=CARRY_Z)
             # Place object 0.5m away from gripper - physically impossible to be holding it
-            self.poses[oid] = Pose(x=x + 0.5, y=y + 0.5, z=0.0)  # Still on table, not in gripper
+            self.poses[oid] = Pose(x=x + 0.5, y=y + 0.5, z=CARRY_Z)
             return SkillOutcome(ok=True)
 
     naive = ScriptedLLM([
@@ -230,23 +230,226 @@ def test_inconsistent_state_holding_without_contact(tmp_path):
 
     result, env, events = run(tmp_path, llm=naive, env=InconsistentStateEnv())
 
-    # Characterization: Document what the current verifier does
-    # The postcondition only checks after.gripper.holding == object_id
-    # It does NOT verify spatial consistency between gripper and object poses
-
-    # Current behavior: Postcondition PASSES because gripper.holding is set correctly
+    # Postcondition should now REJECT spatial inconsistency
     assert of(events, "env_outcome")[0]["outcome"]["ok"] is True
-    [verify_event] = of(events, "verify")
-    # This documents the limitation: verifier accepts inconsistent spatial state
-    # as long as the holding field matches
-    postcondition_passed = verify_event["ok"]
+    verify_event = of(events, "verify")[0]  # Get first verify event (pick)
+    assert not verify_event["ok"]  # Postcondition fails
+    assert verify_event["failure"]["code"] == "POSTCONDITION_FAILED"
+    # Error message should mention XY distance
+    assert "0.707" in verify_event["failure"]["detail"]  # sqrt(0.5^2 + 0.5^2)
+    assert error_codes(events) == ["POSTCONDITION_FAILED", "GOAL_NOT_MET"]
+    assert not result.success
 
-    # Goal check should still fail because object is on table, not on plate
-    if postcondition_passed:
-        # If postcondition accepted the inconsistent state, goal check is the safety net
-        assert error_codes(events) == ["GOAL_NOT_MET"]
-        assert not result.success
-    else:
-        # If postcondition rejected it (future improvement), document that
-        assert error_codes(events) == ["POSTCONDITION_FAILED", "GOAL_NOT_MET"]
-        assert not result.success
+
+def test_pick_postcondition_rejects_object_on_table(tmp_path):
+    """Spatial consistency check rejects object at resting height."""
+    from robot_agent.env import CARRY_Z
+    from robot_agent.world import SkillOutcome
+
+    class ObjectStillOnTableEnv(MockTabletopEnv):
+        def _pick(self, oid, x, y):
+            self.holding = oid
+            self.gripper = Pose(x=x, y=y, z=CARRY_Z)
+            # Object at correct XY but still on table (z=0.0)
+            self.poses[oid] = Pose(x=x, y=y, z=0.0)
+            return SkillOutcome(ok=True)
+
+    naive = ScriptedLLM([
+        [call("pick", object_id="cube_red", x=0.10, y=-0.20)],
+        [call("finish", summary="picked it")],
+    ])
+
+    result, env, events = run(tmp_path, llm=naive, env=ObjectStillOnTableEnv())
+
+    # Postcondition should reject: holding=True but z=0.0 (resting)
+    assert of(events, "env_outcome")[0]["outcome"]["ok"] is True
+    verify_event = of(events, "verify")[0]  # Get first verify event (pick)
+    assert not verify_event["ok"]
+    assert verify_event["failure"]["code"] == "POSTCONDITION_FAILED"
+    assert "z=0.000" in verify_event["failure"]["detail"]
+    assert "resting on table" in verify_event["failure"]["detail"]
+    assert error_codes(events) == ["POSTCONDITION_FAILED", "GOAL_NOT_MET"]
+    assert not result.success
+
+
+def test_pick_postcondition_accepts_minimal_carry_height(tmp_path):
+    """Spatial consistency accepts object just above MIN_CARRY_Z threshold."""
+    from robot_agent.env import CARRY_Z
+    from robot_agent.world import SkillOutcome
+
+    class MinimalCarryEnv(MockTabletopEnv):
+        def _pick(self, oid, x, y):
+            self.holding = oid
+            self.gripper = Pose(x=x, y=y, z=CARRY_Z)
+            # Object at minimal valid carry height: MIN_CARRY_Z + 1mm
+            self.poses[oid] = Pose(x=x, y=y, z=0.051)
+            return SkillOutcome(ok=True)
+
+    result, env, events = run(tmp_path, env=MinimalCarryEnv())
+
+    # Should PASS: just above threshold
+    assert result.success
+    pick_verify = of(events, "verify")[0]  # Get first verify event (pick)
+    assert pick_verify["ok"]
+    assert error_codes(events) == []
+
+
+def test_pick_postcondition_accepts_max_carry_xy_error(tmp_path):
+    """Spatial consistency accepts object at CARRY_XY_TOL boundary."""
+    from robot_agent.env import CARRY_Z
+    from robot_agent.world import SkillOutcome
+
+    class MaxXYErrorEnv(MockTabletopEnv):
+        def _pick(self, oid, x, y):
+            self.holding = oid
+            self.gripper = Pose(x=x, y=y, z=CARRY_Z)
+            # Object at exactly CARRY_XY_TOL distance (0.049m < 0.05m)
+            self.poses[oid] = Pose(x=x + 0.049, y=y, z=CARRY_Z)
+            return SkillOutcome(ok=True)
+
+    result, env, events = run(tmp_path, env=MaxXYErrorEnv())
+
+    # Should PASS: within tolerance
+    assert result.success
+    pick_verify = of(events, "verify")[0]  # Get first verify event (pick)
+    assert pick_verify["ok"]
+
+
+# ========== F008: Baseline Qwen3 Replanning Evaluation ==========
+
+
+def test_failure_context_structure(tmp_path):
+    """Verify tool results include failure code, detail, and fresh world_state."""
+    # Use existing SlipAndNudgeEnv and PickPlacePolicyLLM to generate failure
+    env = SlipAndNudgeEnv(Faults(fail_once={"pick": FailureCode.GRASP_SLIP}))
+    policy = PickPlacePolicyLLM("cube_red", "plate")
+    loop = AgentLoop(env, policy, trace_dir=tmp_path)
+    result = loop.run(pick_place_task(), seed=0)
+
+    # Use existing helper to get events
+    events = loop.tracer.events
+
+    # Get failed tool results
+    failed_tool_results = [e for e in of(events, "tool_result") if not e["ok"]]
+
+    # Verify at least one failure result
+    assert len(failed_tool_results) >= 1, "Expected at least one failed tool result"
+
+    # Verify structure of first failure
+    failure_event = failed_tool_results[0]
+    assert failure_event["ok"] is False
+    assert "error" in failure_event
+    assert "code" in failure_event["error"]  # e.g., "GRASP_SLIP"
+    assert "detail" in failure_event["error"]  # human-readable description
+    assert "world_state" in failure_event  # fresh observation
+    assert "objects" in failure_event["world_state"]
+    assert "gripper" in failure_event["world_state"]
+
+
+@pytest.mark.requires_server
+def test_qwen3_nominal_pick_and_place(tmp_path):
+    """Baseline: Qwen3 completes pick-and-place without injected failures."""
+    from robot_agent.llm import OllamaLLMClient
+
+    env = MockTabletopEnv()
+    llm = OllamaLLMClient(model="qwen3:8b", base_url="http://localhost:11434/v1", temperature=0.0)
+    loop = AgentLoop(env, llm, max_turns=10, trace_dir=tmp_path)
+    result = loop.run(pick_place_task(), seed=0)
+
+    # Collect metrics
+    assert result.success, f"Nominal execution failed: {result.reason}"
+    print(f"\nNominal execution: success={result.success}, llm_turns={result.llm_turns}, "
+          f"skills_executed={result.skills_executed}, failures={result.failures}")
+
+    # Trace analysis (extract tool calls)
+    from pathlib import Path
+    trace_file = list(Path(tmp_path).glob("*.jsonl"))[0]
+    tool_calls = []
+    with open(trace_file) as f:
+        for line in f:
+            event = json.loads(line)
+            if event["event"] == "tool_call":
+                tool_calls.append(event["name"])
+
+    print(f"Tool call sequence: {' → '.join(tool_calls)}")
+
+
+@pytest.mark.requires_server
+def test_qwen3_recovers_from_moved_object(tmp_path):
+    """Qwen3 replans after object moves between observe and execute."""
+    from robot_agent.llm import OllamaLLMClient
+
+    env = SlipAndNudgeEnv(Faults(fail_once={"pick": FailureCode.GRASP_SLIP}))
+    llm = OllamaLLMClient(model="qwen3:8b", base_url="http://localhost:11434/v1", temperature=0.0)
+    loop = AgentLoop(env, llm, max_turns=15, trace_dir=tmp_path)
+    result = loop.run(pick_place_task(), seed=0)
+
+    # Metrics
+    print(f"\nMoved-object recovery: success={result.success}, llm_turns={result.llm_turns}, "
+          f"skills_executed={result.skills_executed}, failures={result.failures}, reason={result.reason}")
+
+    # Trace analysis: verify Qwen3 chose updated coordinates
+    from pathlib import Path
+    trace_file = list(Path(tmp_path).glob("*.jsonl"))[0]
+
+    pick_calls = []
+    with open(trace_file) as f:
+        for line in f:
+            event = json.loads(line)
+            if event["event"] == "tool_call" and event["name"] == "pick":
+                args = event["args"]
+                pick_calls.append((args["x"], args["y"]))
+
+    print(f"Pick coordinates: {pick_calls}")
+    # If Qwen3 replans correctly, second pick should have different coordinates
+    if len(pick_calls) >= 2:
+        dx = abs(pick_calls[0][0] - pick_calls[1][0])
+        dy = abs(pick_calls[0][1] - pick_calls[1][1])
+        print(f"Coordinate change: Δx={dx:.4f}, Δy={dy:.4f}")
+        # SlipAndNudgeEnv nudges by ~0.1m (see line 54), so expect Δ > 0.05m
+        assert dx > 0.05 or dy > 0.05, f"Qwen3 did not update coordinates after failure (Δx={dx}, Δy={dy})"
+
+
+@pytest.mark.requires_server
+def test_qwen3_recovers_from_postcondition_failure(tmp_path):
+    """Qwen3 retries after pick postcondition detects false grasp."""
+    from robot_agent.llm import OllamaLLMClient
+    from robot_agent.world import SkillOutcome
+
+    class TransientFalseSuccessEnv(MockTabletopEnv):
+        """First pick reports ok=True but doesn't set holding (postcondition fails). Second pick succeeds."""
+
+        def __init__(self):
+            super().__init__()
+            self.pick_count = 0
+
+        def _pick(self, oid, x, y):
+            if self.pick_count == 0:
+                self.pick_count += 1
+                # Report success but don't set holding
+                return SkillOutcome(ok=True)
+            return super()._pick(oid, x, y)
+
+    env = TransientFalseSuccessEnv()
+    llm = OllamaLLMClient(model="qwen3:8b", base_url="http://localhost:11434/v1", temperature=0.0)
+    loop = AgentLoop(env, llm, max_turns=15, trace_dir=tmp_path)
+    result = loop.run(pick_place_task(), seed=0)
+
+    # Metrics
+    print(f"\nPostcondition-failure recovery: success={result.success}, llm_turns={result.llm_turns}, "
+          f"skills_executed={result.skills_executed}, failures={result.failures}, reason={result.reason}")
+
+    # Trace analysis: verify Qwen3 observed after postcondition failure
+    from pathlib import Path
+    trace_file = list(Path(tmp_path).glob("*.jsonl"))[0]
+
+    sequence = []
+    with open(trace_file) as f:
+        for line in f:
+            event = json.loads(line)
+            if event["event"] == "tool_call":
+                sequence.append(event["name"])
+            elif event["event"] == "tool_result" and not event["ok"]:
+                sequence.append(f"FAIL({event['error']['code']})")
+
+    print(f"Event sequence: {' → '.join(sequence)}")

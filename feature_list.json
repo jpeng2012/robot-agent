@@ -77,6 +77,36 @@
       ],
       "verification": "pytest tests/test_loop.py::test_pick_postcondition_catches_false_success tests/test_loop.py::test_failed_pick_recovers_by_bounded_retry -v",
       "notes": "Pick postcondition (skills.py:67-73) verified by test_pick_postcondition_catches_false_success. Spatial consistency limitation documented in test_inconsistent_state_holding_without_contact (goal check provides defense-in-depth)."
+    },
+    {
+      "id": "F007",
+      "title": "Spatial consistency verification for pick postcondition",
+      "status": "complete",
+      "acceptance": [
+        "Postcondition verifies held object XY position within CARRY_XY_TOL of gripper",
+        "Postcondition verifies held object z-height >= MIN_CARRY_Z (not resting)",
+        "test_inconsistent_state_holding_without_contact now rejects XY inconsistency",
+        "test_pick_postcondition_rejects_object_on_table passes",
+        "All existing pick tests still pass (no regressions)"
+      ],
+      "verification": "pytest tests/test_loop.py::test_inconsistent_state_holding_without_contact tests/test_loop.py::test_pick_postcondition_rejects_object_on_table -v",
+      "notes": "Enhances F006 pick postcondition with spatial consistency checks. Detects false grasps where holding=True but object pose incompatible with gripper. Uses CARRY_XY_TOL=0.05m and MIN_CARRY_Z=0.05m. Robosuite compatibility verified theoretically (LIFTED_Z=0.08m > MIN_CARRY_Z); XY distance empirically unverified (requires live Robosuite)."
+    },
+    {
+      "id": "F008",
+      "title": "Baseline Qwen3 replanning evaluation",
+      "status": "complete",
+      "acceptance": [
+        "Deterministic test verifies failure context structure (code, detail, world_state)",
+        "Live Qwen3 evaluation: nominal pick-and-place baseline (success rate, llm_turns, tool calls)",
+        "Live Qwen3 evaluation: moved-object recovery (coordinate update verification from traces)",
+        "Live Qwen3 evaluation: postcondition-failure recovery (retry pattern from traces)",
+        "Baseline measurements recorded: task success, recovery success, LLM turns, termination reasons",
+        "Trace analysis confirms Qwen3 updates coordinates after OBJECT_NOT_AT_POSE",
+        "Documentation distinguishes automatic retry from LLM replanning"
+      ],
+      "verification": "pytest tests/test_loop.py::test_failure_context_structure -v && pytest tests/test_loop.py -k 'qwen3' -v -s",
+      "notes": "Baseline evaluation of Qwen3 replanning capability using existing infrastructure. Infrastructure already existed in F002; F008 measures real LLM behavior. No prompt enhancements or recovery heuristics added. Defers improvements to future features based on these measurements. Baseline results: Nominal (4 turns, 100% success), Moved-object recovery (5 turns, Δx=0.10m, 100% success), Postcondition-failure recovery (5 turns, 100% success)."
     }
   ],
   "backlog": [
@@ -99,11 +129,27 @@
         "Document robosuite setup (Python 3.10, MuJoCo license)"
       ],
       "blockers": "Requires robosuite installation and Python 3.10 environment"
+    },
+    {
+      "id": "B003",
+      "title": "Empirical validation of F007 spatial thresholds with Robosuite",
+      "status": "blocked",
+      "acceptance": [
+        "Measure XY distance between gripper and cube during successful Robosuite grasps across 10+ seeds",
+        "Confirm all XY measurements < CARRY_XY_TOL (0.05m)",
+        "Confirm all Z heights > MIN_CARRY_Z (0.05m)",
+        "Compute false-rejection rate: successful grasps rejected by F007 checks",
+        "Report actual XY distance distribution: min, max, mean, p95",
+        "test_direct_pick_then_place_meets_goal passes with F007 active"
+      ],
+      "verification": "pytest tests/test_robosuite_env.py::test_direct_pick_then_place_meets_goal -v -s",
+      "blockers": "Requires Robosuite installation and ROBOT_AGENT_ROBOSUITE_PYTHON environment",
+      "notes": "Uses raw observations from independently successful Robosuite grasps (fsm_lifted + grasped + lifted) to validate F007 thresholds don't cause false rejections. Measurements taken from out.info containing eef_pose_world and cube_pose_world."
     }
   ],
   "meta": {
     "last_updated": "2026-11-07",
     "baseline_commit": "45cd36b",
-    "baseline_test_status": "41 passed, 5 skipped in 0.16s"
+    "baseline_test_status": "45 passed, 5 skipped in 0.18s (was 44 before F008)"
   }
 }

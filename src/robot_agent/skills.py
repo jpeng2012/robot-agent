@@ -14,6 +14,8 @@ from robot_agent.env import GRASP_TOL
 from robot_agent.world import WORKSPACE, Failure, FailureCode, SkillOutcome, WorldState
 
 PLACE_TOL = 0.02
+CARRY_XY_TOL = 0.05  # max XY distance between held object and gripper, metres
+MIN_CARRY_Z = 0.05   # min z-height for held object (agent frame: z=0 is resting), metres
 
 
 class _Args(BaseModel):
@@ -70,6 +72,27 @@ def _pick_post(before: WorldState, after: WorldState, a: PickArgs) -> Failure | 
             code=FailureCode.POSTCONDITION_FAILED,
             detail=f"expected to hold {a.object_id}, holding {after.gripper.holding}",
         )
+
+    # Spatial consistency: held object should be near gripper
+    obj_pose = after.objects[a.object_id].pose
+    gripper_pose = after.gripper.pose
+    xy_err = obj_pose.dist_xy(gripper_pose.x, gripper_pose.y)
+    if xy_err > CARRY_XY_TOL:
+        return Failure(
+            code=FailureCode.POSTCONDITION_FAILED,
+            detail=f"holding {a.object_id} but object is {xy_err:.3f} m from gripper in XY "
+                   f"(object at ({obj_pose.x:.3f}, {obj_pose.y:.3f}), "
+                   f"gripper at ({gripper_pose.x:.3f}, {gripper_pose.y:.3f}))",
+        )
+
+    # Spatial consistency: held object should be elevated, not resting
+    if obj_pose.z < MIN_CARRY_Z:
+        return Failure(
+            code=FailureCode.POSTCONDITION_FAILED,
+            detail=f"holding {a.object_id} but object z={obj_pose.z:.3f} < {MIN_CARRY_Z} "
+                   f"(appears to be resting on table, not carried)",
+        )
+
     return None
 
 

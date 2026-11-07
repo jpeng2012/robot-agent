@@ -18,6 +18,10 @@ class Pose(BaseModel):
     def dist_xy(self, x: float, y: float) -> float:
         return math.hypot(self.x - x, self.y - y)
 
+    def dist_xyz(self, other: "Pose") -> float:
+        """Euclidean distance in 3D."""
+        return math.sqrt((self.x - other.x)**2 + (self.y - other.y)**2 + (self.z - other.z)**2)
+
 
 class ObjectObs(BaseModel):
     id: str
