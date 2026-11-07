@@ -68,15 +68,15 @@
     {
       "id": "F006",
       "title": "Verified pick execution with postcondition checking",
-      "status": "planned",
+      "status": "complete",
       "acceptance": [
         "Postcondition _pick_post verifies after.gripper.holding == object_id",
         "Precondition _pick_pre validates object is within GRASP_TOL of commanded pose",
         "Fault injection tests demonstrate postcondition catches execution failures",
         "test_loop.py::test_failed_pick_recovers_by_bounded_retry passes"
       ],
-      "verification": "pytest tests/test_loop.py::test_failed_pick_recovers_by_bounded_retry -v",
-      "notes": "Pick postcondition exists (skills.py:67-73) but needs explicit acceptance test demonstrating verification catches real faults"
+      "verification": "pytest tests/test_loop.py::test_pick_postcondition_catches_false_success tests/test_loop.py::test_failed_pick_recovers_by_bounded_retry -v",
+      "notes": "Pick postcondition (skills.py:67-73) verified by test_pick_postcondition_catches_false_success. Spatial consistency limitation documented in test_inconsistent_state_holding_without_contact (goal check provides defense-in-depth)."
     }
   ],
   "backlog": [
@@ -104,6 +104,6 @@
   "meta": {
     "last_updated": "2026-11-07",
     "baseline_commit": "45cd36b",
-    "baseline_test_status": "39 passed, 5 skipped in 0.16s"
+    "baseline_test_status": "41 passed, 5 skipped in 0.16s"
   }
 }

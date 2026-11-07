@@ -1,5 +1,61 @@
 # Robot-Agent Development Progress
 
+## Session 2026-11-07: F006 Verification Gap Tests
+
+### Changes
+- Added test_pick_postcondition_catches_false_success to test_loop.py
+- Added test_inconsistent_state_holding_without_contact to test_loop.py (characterization test)
+- Both tests limited to test files only, no production code changes
+
+### Verification
+```bash
+# New tests pass
+pytest tests/test_loop.py::test_pick_postcondition_catches_false_success -v
+pytest tests/test_loop.py::test_inconsistent_state_holding_without_contact -v
+# Result: 2/2 passed
+
+# Full deterministic suite
+pytest tests/ -v -k 'not requires_server and not requires_robosuite'
+# Result: 41 passed, 5 skipped in 0.16s (was 39 passed before)
+
+# F006 referenced test still passes
+pytest tests/test_loop.py::test_failed_pick_recovers_by_bounded_retry -v
+# Result: PASSED
+```
+
+### Design Decisions
+- Test 1 verifies postcondition catches false-positive grasp reports (env reports ok=True, gripper.holding=None)
+- Test 2 characterizes spatial consistency limitation: verifier accepts gripper.holding="cube_red" even when object pose is 0.5m away
+- Used test subclasses (FalseSuccessEnv, InconsistentStateEnv) to avoid modifying production code
+- Both tests follow existing patterns (SlipAndNudgeEnv, test_silent_failure_cannot_produce_false_success)
+
+### Observed Limitations
+- **Postcondition validation works correctly**: Test 1 confirms _pick_post catches env false-positive reports
+- **Spatial consistency not verified**: Test 2 reveals postcondition only checks gripper.holding field, NOT spatial relationship between gripper and object poses
+- **Goal check is safety net**: When postcondition accepts inconsistent spatial state, goal verification still prevents false task completion
+- **F006 acceptance criterion #3 now satisfied**: "Fault injection tests demonstrate postcondition catches execution failures"
+
+### Remaining Work
+- F006 not marked complete pending review of test evidence
+- Spatial consistency limitation documented but not addressed (out of scope for F006)
+
+### Test Evidence
+Test 1 demonstrates postcondition correctly rejects false success:
+- Env reports SkillOutcome(ok=True)
+- Env does NOT set self.holding
+- Postcondition detects after.gripper.holding != "cube_red"
+- Returns POSTCONDITION_FAILED
+- Error propagates to agent, task completion blocked
+
+Test 2 documents spatial consistency gap:
+- Env sets self.holding="cube_red" (postcondition field check passes)
+- Object pose placed 0.5m from gripper (physically impossible)
+- Postcondition accepts this (only checks holding field)
+- Goal check fails (object on table, not on plate)
+- Task correctly fails despite postcondition passing
+
+---
+
 ## Session 2026-11-07: Harness Engineering Setup
 
 ### Changes

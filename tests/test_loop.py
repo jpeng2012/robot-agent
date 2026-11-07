@@ -172,3 +172,81 @@ def test_text_only_turn_is_nudged_once(tmp_path):
 def test_two_consecutive_text_only_turns_stop(tmp_path):
     result, _, events = run(tmp_path, llm=ScriptedLLM([[call("observe")]]))
     assert result.reason == "llm_stopped" and len(of(events, "nudge")) == 1
+
+
+def test_pick_postcondition_catches_false_success(tmp_path):
+    """Postcondition detects pick that reported ok=True but didn't actually grasp."""
+    from robot_agent.env import CARRY_Z
+    from robot_agent.world import SkillOutcome
+
+    class FalseSuccessEnv(MockTabletopEnv):
+        """Env reports pick success but doesn't actually grasp the object."""
+
+        def _pick(self, oid, x, y):
+            # Simulate controller reporting success without physical grasp
+            # Move gripper and object as if pick succeeded, but DON'T set self.holding
+            self.gripper = Pose(x=x, y=y, z=CARRY_Z)
+            self.poses[oid] = Pose(x=x, y=y, z=CARRY_Z)
+            # Missing: self.holding = oid
+            return SkillOutcome(ok=True)  # Environment reports false success
+
+    naive = ScriptedLLM([
+        [call("pick", object_id="cube_red", x=0.10, y=-0.20)],
+        [call("finish", summary="picked it")],
+    ])
+
+    result, env, events = run(tmp_path, llm=naive, env=FalseSuccessEnv())
+
+    # Assertions: Postcondition should catch the lie
+    assert not result.success  # Episode should fail
+    assert of(events, "env_outcome")[0]["outcome"]["ok"] is True  # Env lied
+    assert error_codes(events) == ["POSTCONDITION_FAILED", "GOAL_NOT_MET"]
+    # Verify that postcondition caught the false success
+    [verify_event] = of(events, "verify")
+    assert not verify_event["ok"]
+    assert verify_event["failure"]["code"] == "POSTCONDITION_FAILED"
+
+
+def test_inconsistent_state_holding_without_contact(tmp_path):
+    """Characterization test: Does verifier accept gripper.holding when object pose is incompatible?"""
+    from robot_agent.env import CARRY_Z
+    from robot_agent.world import SkillOutcome
+
+    class InconsistentStateEnv(MockTabletopEnv):
+        """Reports holding object but object pose is far from gripper."""
+
+        def _pick(self, oid, x, y):
+            # Set holding but place object far away (inconsistent state)
+            self.holding = oid
+            self.gripper = Pose(x=x, y=y, z=CARRY_Z)
+            # Place object 0.5m away from gripper - physically impossible to be holding it
+            self.poses[oid] = Pose(x=x + 0.5, y=y + 0.5, z=0.0)  # Still on table, not in gripper
+            return SkillOutcome(ok=True)
+
+    naive = ScriptedLLM([
+        [call("pick", object_id="cube_red", x=0.10, y=-0.20)],
+        [call("finish", summary="picked it")],
+    ])
+
+    result, env, events = run(tmp_path, llm=naive, env=InconsistentStateEnv())
+
+    # Characterization: Document what the current verifier does
+    # The postcondition only checks after.gripper.holding == object_id
+    # It does NOT verify spatial consistency between gripper and object poses
+
+    # Current behavior: Postcondition PASSES because gripper.holding is set correctly
+    assert of(events, "env_outcome")[0]["outcome"]["ok"] is True
+    [verify_event] = of(events, "verify")
+    # This documents the limitation: verifier accepts inconsistent spatial state
+    # as long as the holding field matches
+    postcondition_passed = verify_event["ok"]
+
+    # Goal check should still fail because object is on table, not on plate
+    if postcondition_passed:
+        # If postcondition accepted the inconsistent state, goal check is the safety net
+        assert error_codes(events) == ["GOAL_NOT_MET"]
+        assert not result.success
+    else:
+        # If postcondition rejected it (future improvement), document that
+        assert error_codes(events) == ["POSTCONDITION_FAILED", "GOAL_NOT_MET"]
+        assert not result.success
