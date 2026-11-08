@@ -50,6 +50,7 @@ def main() -> None:
     ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--trace-dir", default="traces")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--enable-memory", action="store_true", help="enable episodic memory retrieval (F009b)")
     ap.add_argument("--env", choices=["mock", "robosuite"], default="mock")
     ap.add_argument("--robosuite-python", help="interpreter with robosuite (default: $ROBOT_AGENT_ROBOSUITE_PYTHON)")
     ap.add_argument("--render", action="store_true", help="robosuite on-screen viewer")
@@ -66,7 +67,8 @@ def main() -> None:
         for i in range(a.repeat):
             env = robosuite_env or MockTabletopEnv(SCENARIOS[a.scenario]())
             loop = AgentLoop(env, make_llm(a), trace_dir=a.trace_dir,
-                             max_turns=a.max_turns, max_retries=a.max_retries, max_failures=a.max_failures)
+                             max_turns=a.max_turns, max_retries=a.max_retries, max_failures=a.max_failures,
+                             enable_memory=a.enable_memory)
             result = loop.run(task, seed=a.seed + i)
             label = {"env": a.env, "backend": a.backend, "model": a.model if a.backend == "ollama" else None,
                      "think": a.think if a.backend == "ollama" else None, "scenario": a.scenario}

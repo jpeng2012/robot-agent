@@ -301,8 +301,8 @@ class MemoryStore:
         if memory.provenance.get("llm") == "ScriptedLLM":
             return False
 
-        # Exclude test directories
-        if any(pattern in memory.trace_path for pattern in self.exclude_patterns):
+        # Exclude test traces (check episode_id to avoid matching parent directories)
+        if any(pattern in memory.episode_id for pattern in self.exclude_patterns):
             return False
 
         # For successful episodes, verify goal was actually achieved
@@ -360,7 +360,8 @@ class MemoryStore:
         """
         Format memory as coordinate-free narrative for LLM context.
 
-        Excludes all object positions and world state.
+        Excludes raw LLM reasoning, coordinates, world states, and file paths.
+        Emits only validated structured facts.
         """
         # Compute time ago
         time_ago = time.time() - memory.timestamp
@@ -385,10 +386,5 @@ class MemoryStore:
                     lines.append(f"    - {action['name']}({action['object_id']})")
                 else:
                     lines.append(f"    - {action['name']}()")
-
-        if memory.llm_reasoning:
-            lines.append("  Reasoning:")
-            for text in memory.llm_reasoning[:3]:  # Limit to first 3 reasoning steps
-                lines.append(f"    - {text}")
 
         return "\n".join(lines)

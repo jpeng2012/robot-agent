@@ -1,12 +1,14 @@
 """Acceptance scenarios for the closed loop."""
 
 import json
+import re
+from pathlib import Path
 
 import pytest
 
 from robot_agent.env import Faults, MockTabletopEnv
 from robot_agent.goals import pick_place_task
-from robot_agent.llm import PickPlacePolicyLLM, ScriptedLLM, call
+from robot_agent.llm import AssistantTurn, PickPlacePolicyLLM, ScriptedLLM, call
 from robot_agent.loop import AgentLoop
 from robot_agent.world import FailureCode, Pose
 
@@ -453,3 +455,167 @@ def test_qwen3_recovers_from_postcondition_failure(tmp_path):
                 sequence.append(f"FAIL({event['error']['code']})")
 
     print(f"Event sequence: {' → '.join(sequence)}")
+
+
+# F009b Stage 1: Memory integration tests
+
+
+class RecordingLLM:
+    """LLM stub that records system prompt and messages, then executes a script."""
+
+    def __init__(self, script: list[list]):
+        self.script = list(script)
+        self.recorded_calls = []
+
+    def step(self, system: str, messages: list[dict], tools: list[dict]):
+        # Record what the planner received
+        self.recorded_calls.append({
+            "system": system,
+            "messages": [m.copy() for m in messages],  # Deep copy
+            "tools": tools
+        })
+
+        if not self.script:
+            return AssistantTurn(text="script exhausted")
+        return AssistantTurn(tool_calls=self.script.pop(0))
+
+
+def create_sample_successful_trace(path: Path):
+    """Create a minimal successful pick_place trace for testing."""
+    with path.open("w") as f:
+        json.dump({"event": "episode_start", "ts": 1234567890.0,
+                  "task": {"name": "pick_place", "instruction": "Pick and place"},
+                  "llm": "OllamaLLMClient", "model": "qwen3"}, f)
+        f.write("\n")
+        json.dump({"event": "env_outcome", "outcome": {"ok": False, "failure": {"code": "GRASP_SLIP"}}}, f)
+        f.write("\n")
+        json.dump({"event": "tool_call", "name": "pick", "args": {"object_id": "cube_red"}}, f)
+        f.write("\n")
+        json.dump({"event": "goal_check", "passed": True}, f)
+        f.write("\n")
+        json.dump({"event": "episode_end", "result": {"success": True, "reason": "goal_met"}}, f)
+        f.write("\n")
+
+
+def test_memory_disabled_by_default(tmp_path):
+    """Verify no memory events when enable_memory=False (default)."""
+    env = MockTabletopEnv()
+    llm = ScriptedLLM([[call("observe")], [call("pick", object_id="cube_red", x=0.1, y=-0.2)],
+                      [call("place", x=-0.2, y=0.15)], [call("finish")]])
+    loop = AgentLoop(env, llm, trace_dir=tmp_path)
+    result = loop.run(pick_place_task(), seed=0)
+
+    # Read trace events
+    with result.trace_path.open("r") as f:
+        events = [json.loads(line) for line in f if line.strip()]
+
+    # Assert no memory events
+    memory_events = [e for e in events if e["event"] in ("memory_index", "memory_retrieval", "memory_error")]
+    assert len(memory_events) == 0
+
+
+def test_memory_injection_context_verification(tmp_path):
+    """Verify exact planner context with memory enabled using RecordingLLM."""
+    # Create memory trace
+    memory_dir = tmp_path / "memory_traces"
+    memory_dir.mkdir()
+    create_sample_successful_trace(memory_dir / "sample_pick_place.jsonl")
+
+    env = MockTabletopEnv()
+    llm = RecordingLLM([[call("observe")], [call("finish")]])
+    loop = AgentLoop(env, llm, trace_dir=tmp_path, enable_memory=True,
+                    memory_trace_dirs=[memory_dir])
+    result = loop.run(pick_place_task(), seed=0)
+
+    # Verify first LLM call received memory context
+    assert len(llm.recorded_calls) >= 1
+    first_call = llm.recorded_calls[0]
+
+    # Verify system prompt unchanged (imported from loop.py)
+    from robot_agent.loop import SYSTEM_PROMPT
+    assert first_call["system"] == SYSTEM_PROMPT
+
+    # Assert we have at least 2 user messages (task + memory)
+    user_messages = [m for m in first_call["messages"] if m["role"] == "user"]
+    assert len(user_messages) == 2, f"Expected 2 user messages, got {len(user_messages)}: {[m.get('content', '')[:50] for m in user_messages]}"
+
+    # Assert task message present
+    task_msg = user_messages[0]
+    assert "Task:" in task_msg["content"]
+
+    # Assert memory message present
+    memory_msg = user_messages[1]
+    assert "similar past episodes" in memory_msg["content"].lower()
+    assert "historical data, not current state" in memory_msg["content"]
+    assert "fresh observations" in memory_msg["content"]
+
+    # Assert no raw LLM reasoning or coordinates in memory context
+    assert not re.search(r'[xyz]\s*=\s*-?[0-9]', memory_msg["content"])
+
+    # Assert no world_state or trace_path leaked
+    assert "world_state" not in memory_msg["content"]
+    assert "gripper" not in memory_msg["content"]
+    assert ".jsonl" not in memory_msg["content"]
+    assert "trace" not in memory_msg["content"].lower() or "traces" in memory_msg["content"].lower()  # Allow "memory_traces" dir name
+
+
+def test_memory_disabled_context_verification(tmp_path):
+    """Verify planner receives NO memory context when disabled."""
+    env = MockTabletopEnv()
+    llm = RecordingLLM([[call("observe")], [call("finish")]])
+    loop = AgentLoop(env, llm, trace_dir=tmp_path, enable_memory=False)
+    result = loop.run(pick_place_task(), seed=0)
+
+    # Verify first LLM call received ONLY task message
+    assert len(llm.recorded_calls) >= 1
+    first_call = llm.recorded_calls[0]
+
+    # Only task message present (no memory)
+    user_messages = [m for m in first_call["messages"] if m["role"] == "user"]
+    assert len(user_messages) == 1
+    assert "Task:" in user_messages[0]["content"]
+    assert "similar past episodes" not in user_messages[0]["content"]
+
+
+def test_memory_graceful_degradation_missing_dirs(tmp_path):
+    """Verify missing directories don't crash episode."""
+    env = MockTabletopEnv()
+    llm = ScriptedLLM([[call("observe")], [call("finish")]])
+    loop = AgentLoop(env, llm, trace_dir=tmp_path, enable_memory=True,
+                    memory_trace_dirs=[tmp_path / "nonexistent"])
+
+    # Should not crash
+    result = loop.run(pick_place_task(), seed=0)
+    assert result.success or result.reason in ("llm_stopped", "max_steps")  # Graceful outcome
+
+    # Check for memory_error or memory_retrieval with count=0
+    with result.trace_path.open("r") as f:
+        events = [json.loads(line) for line in f if line.strip()]
+
+    memory_events = [e for e in events if e["event"] in ("memory_error", "memory_retrieval")]
+    assert len(memory_events) >= 1  # Either error or empty retrieval
+
+
+def test_memory_index_reused_across_episodes(tmp_path):
+    """Verify lazy init creates index once, reuses across episodes."""
+    memory_dir = tmp_path / "memory_traces"
+    memory_dir.mkdir()
+    create_sample_successful_trace(memory_dir / "sample.jsonl")
+
+    env = MockTabletopEnv()
+    loop = AgentLoop(env, PickPlacePolicyLLM("cube_red", "plate"),
+                    trace_dir=tmp_path, enable_memory=True,
+                    memory_trace_dirs=[memory_dir])
+
+    # Run 3 episodes
+    for i in range(3):
+        result = loop.run(pick_place_task(), seed=i)
+
+        with result.trace_path.open("r") as f:
+            events = [json.loads(line) for line in f if line.strip()]
+
+        index_events = [e for e in events if e["event"] == "memory_index"]
+        if i == 0:
+            assert len(index_events) == 1  # Index created on first episode
+        else:
+            assert len(index_events) == 0  # Reused, not recreated

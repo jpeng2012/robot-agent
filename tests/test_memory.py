@@ -1028,3 +1028,36 @@ class TestMemoryStore:
 
         assert count == 2
         assert len(store.memories) == 2
+
+    def test_format_memory_excludes_llm_reasoning(self, temp_traces):
+        """Test format_memory() does NOT include raw LLM reasoning (F009b safety)."""
+        # Create trace with LLM reasoning containing sensitive content
+        trace_file = temp_traces / "sample.jsonl"
+        with trace_file.open("w") as f:
+            json.dump({"event": "episode_start", "ts": 1234567890.0,
+                      "task": {"name": "pick_place", "instruction": "Pick cube"},
+                      "llm": "OllamaLLMClient", "model": "qwen3"}, f)
+            f.write("\n")
+            json.dump({"event": "llm_turn", "turn": 0,
+                      "text": "I will use coordinates x=0.5, y=0.3 to pick the object"}, f)
+            f.write("\n")
+            json.dump({"event": "goal_check", "passed": True}, f)
+            f.write("\n")
+            json.dump({"event": "episode_end", "result": {"success": True, "reason": "goal_met"}}, f)
+            f.write("\n")
+
+        index_path = temp_traces / ".test_index.json"
+        store = MemoryStore(trace_dirs=[temp_traces], index_path=index_path)
+        store.index_episodes()
+
+        memory = store.memories[0]
+        formatted = store.format_memory(memory)
+
+        # Assert raw LLM reasoning NOT in formatted output
+        assert "coordinates x=0.5" not in formatted
+        assert "I will use" not in formatted
+
+        # Assert only structured facts present
+        assert "Episode from" in formatted
+        assert "Task: pick_place" in formatted
+        assert "Outcome: SUCCESS" in formatted

@@ -107,6 +107,23 @@
       ],
       "verification": "pytest tests/test_loop.py::test_failure_context_structure -v && pytest tests/test_loop.py -k 'qwen3' -v -s",
       "notes": "Baseline evaluation of Qwen3 replanning capability using existing infrastructure. Infrastructure already existed in F002; F008 measures real LLM behavior. No prompt enhancements or recovery heuristics added. Defers improvements to future features based on these measurements. Baseline results: Nominal (4 turns, 100% success), Moved-object recovery (5 turns, Δx=0.10m, 100% success), Postcondition-failure recovery (5 turns, 100% success)."
+    },
+    {
+      "id": "F009",
+      "title": "Persistent episodic memory with safe LLM integration",
+      "status": "partial",
+      "acceptance": [
+        "F009a: MemoryStore indexes JSONL traces, excludes test/ScriptedLLM/unverified episodes (26 tests pass)",
+        "F009a: Episode eligibility verified - 77 episodes indexed from qwen/qwen2/baseline subdirectories",
+        "F009b Stage 1: AgentLoop supports optional memory (enable_memory=False by default)",
+        "F009b Stage 1: format_memory() excludes raw LLM reasoning, coordinates, world state, file paths",
+        "F009b Stage 1: Memory framed as 'historical data, not current state' with explicit boundary",
+        "F009b Stage 1: RecordingLLM verifies SYSTEM_PROMPT unchanged, no sensitive data leaked",
+        "F009b Stage 1: Graceful degradation on missing directories or errors",
+        "All 79 tests pass (73 existing + 6 new), no regressions"
+      ],
+      "verification": "pytest tests/test_memory.py tests/test_loop.py -v",
+      "notes": "F009a complete: Coordinate-free episodic memory storage from JSONL traces. F009b Stage 1 complete: Safe memory injection into AgentLoop. DEFERRED to Stage 2: 30-run Qwen3 paired evaluation (memory-on vs memory-off), statistical analysis, test_memory_integration.py. Limitations: Memory index is file-based (mtime tracking, force_reindex for manual cleanup), default trace directories (qwen/, qwen2/, baseline/) are configurable, episode ID collision risk for same filenames in different directories."
     }
   ],
   "backlog": [
@@ -150,6 +167,6 @@
   "meta": {
     "last_updated": "2026-11-07",
     "baseline_commit": "45cd36b",
-    "baseline_test_status": "45 passed, 5 skipped in 0.18s (was 44 before F008)"
+    "baseline_test_status": "79 passed, 5 skipped (was 45 before F009, +26 from test_memory.py, +6 from test_loop.py, +2 from format_memory fixes)"
   }
 }

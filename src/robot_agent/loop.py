@@ -42,10 +42,30 @@ class EpisodeResult(BaseModel):
 
 class AgentLoop:
     def __init__(self, env: RobotEnv, llm: LLMClient, trace_dir: Path | str = "traces",
-                 max_turns: int = 20, max_retries: int = 2, max_failures: int = 8):
+                 max_turns: int = 20, max_retries: int = 2, max_failures: int = 8,
+                 enable_memory: bool = False,
+                 memory_trace_dirs: list[Path | str] | None = None,
+                 memory_index_path: str = ".memory_index.json"):
         self.env, self.llm = env, llm
         self.trace_dir = Path(trace_dir)
         self.max_turns, self.max_retries, self.max_failures = max_turns, max_retries, max_failures
+        self.enable_memory = enable_memory
+        self._memory_store = None
+
+        # Configure memory if enabled
+        if enable_memory:
+            default_dirs = [
+                Path(trace_dir) / "qwen",
+                Path(trace_dir) / "qwen2",
+                Path(trace_dir) / "baseline"
+            ]
+            self._memory_config = {
+                "trace_dirs": memory_trace_dirs or default_dirs,
+                "index_path": Path(trace_dir) / memory_index_path,
+                "exclude_patterns": ["test_"]
+            }
+        else:
+            self._memory_config = None
 
     def run(self, task: TaskSpec, seed: int | None = None) -> EpisodeResult:
         self.tracer = Tracer(self.trace_dir, task.name)
@@ -57,6 +77,11 @@ class AgentLoop:
                         model=getattr(self.llm, "model", None), max_turns=self.max_turns,
                         max_retries=self.max_retries, max_failures=self.max_failures)
         messages: list[dict] = [{"role": "user", "content": f"Task: {task.instruction}"}]
+
+        # Memory injection (F009b Stage 1)
+        if self._memory_config is not None:
+            self._inject_memory(task.name, messages)
+
         tools = tool_schemas()
         idle = False
         try:
@@ -154,6 +179,56 @@ class AgentLoop:
         )
         self.tracer.log("episode_end", result=result, unmet=check_goal(task, final), state=final)
         return result
+
+    def _inject_memory(self, task_name: str, messages: list[dict]) -> None:
+        """
+        Retrieve and inject episodic memories before first LLM turn.
+
+        Memories are framed as untrusted historical experience.
+        Failures are logged and disable memory for remaining episodes.
+        """
+        try:
+            # Lazy initialization on first use
+            if self._memory_store is None:
+                from robot_agent.memory import MemoryStore
+                self._memory_store = MemoryStore(
+                    trace_dirs=self._memory_config["trace_dirs"],
+                    index_path=self._memory_config["index_path"],
+                    exclude_patterns=self._memory_config["exclude_patterns"]
+                )
+                indexed = self._memory_store.index_episodes()
+                self.tracer.log("memory_index",
+                              episodes_indexed=indexed,
+                              trace_dirs=[str(d) for d in self._memory_config["trace_dirs"]])
+
+            # Retrieve up to 3 relevant memories
+            memories = self._memory_store.retrieve(task_name=task_name, limit=3)
+
+            if memories:
+                # Frame as untrusted historical experience
+                memory_lines = [
+                    "Here are similar past episodes for reference (historical data, not current state):"
+                ]
+                for mem in memories:
+                    memory_lines.append(self._memory_store.format_memory(mem))
+                    memory_lines.append("")
+
+                # Explicit boundary: now use fresh observations
+                memory_text = ("\n".join(memory_lines) +
+                             "\nNow, complete the current task using fresh observations from the environment.")
+
+                messages.append({"role": "user", "content": memory_text})
+                self.tracer.log("memory_retrieval",
+                              task_name=task_name,
+                              episode_ids=[m.episode_id for m in memories],
+                              count=len(memories))
+            else:
+                self.tracer.log("memory_retrieval", task_name=task_name, count=0)
+
+        except Exception as e:
+            # Graceful degradation: log error and disable for remaining episodes
+            self.tracer.log("memory_error", error=repr(e))
+            self._memory_config = None
 
 
 def _ok(state: WorldState, retries_used: int = 0) -> dict:
