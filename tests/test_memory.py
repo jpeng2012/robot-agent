@@ -1061,3 +1061,309 @@ class TestMemoryStore:
         assert "Episode from" in formatted
         assert "Task: pick_place" in formatted
         assert "Outcome: SUCCESS" in formatted
+
+    def test_recovery_actions_only_successful(self, temp_traces):
+        """Test recovery actions only include successful actions, not rejected attempts."""
+        # Create trace with failed pick → rejected place → successful pick
+        trace_file = temp_traces / "recovery_test.jsonl"
+        with trace_file.open("w") as f:
+            json.dump({"event": "episode_start", "ts": 1234567890.0,
+                      "task": {"name": "pick_place", "instruction": "Pick and place"},
+                      "llm": "OllamaLLMClient", "model": "qwen3"}, f)
+            f.write("\n")
+
+            # First pick attempt - POSTCONDITION_FAILED
+            json.dump({"event": "tool_call", "call_id": "call_1", "name": "pick",
+                      "args": {"object_id": "cube_red", "x": 0.1, "y": -0.2}}, f)
+            f.write("\n")
+            json.dump({"event": "env_outcome", "call_id": "call_1",
+                      "outcome": {"ok": True, "failure": None}}, f)
+            f.write("\n")
+            json.dump({"event": "verify", "call_id": "call_1", "ok": False,
+                      "failure": {"code": "POSTCONDITION_FAILED", "detail": "not holding"}}, f)
+            f.write("\n")
+
+            # Place attempt - NOT_HOLDING (rejected by validation)
+            json.dump({"event": "tool_call", "call_id": "call_2", "name": "place",
+                      "args": {"x": -0.2, "y": 0.15}}, f)
+            f.write("\n")
+            json.dump({"event": "validation_error", "call_id": "call_2",
+                      "failure": {"code": "NOT_HOLDING", "detail": "gripper empty"}}, f)
+            f.write("\n")
+
+            # Second pick attempt - SUCCESS
+            json.dump({"event": "tool_call", "call_id": "call_3", "name": "pick",
+                      "args": {"object_id": "cube_red", "x": 0.1, "y": -0.2}}, f)
+            f.write("\n")
+            json.dump({"event": "env_outcome", "call_id": "call_3",
+                      "outcome": {"ok": True, "failure": None}}, f)
+            f.write("\n")
+            json.dump({"event": "verify", "call_id": "call_3", "ok": True, "failure": None}, f)
+            f.write("\n")
+
+            # Place - SUCCESS
+            json.dump({"event": "tool_call", "call_id": "call_4", "name": "place",
+                      "args": {"x": -0.2, "y": 0.15}}, f)
+            f.write("\n")
+            json.dump({"event": "env_outcome", "call_id": "call_4",
+                      "outcome": {"ok": True, "failure": None}}, f)
+            f.write("\n")
+            json.dump({"event": "verify", "call_id": "call_4", "ok": True, "failure": None}, f)
+            f.write("\n")
+
+            json.dump({"event": "goal_check", "passed": True}, f)
+            f.write("\n")
+            json.dump({"event": "episode_end", "result": {"success": True, "reason": "goal_met"}}, f)
+            f.write("\n")
+
+        index_path = temp_traces / ".test_index.json"
+        store = MemoryStore(trace_dirs=[temp_traces], index_path=index_path)
+        store.index_episodes()
+
+        memory = store.memories[0]
+
+        # Should only have the successful pick (call_3), not the rejected place (call_2)
+        assert len(memory.recovery_actions) == 1
+        assert memory.recovery_actions[0]["name"] == "pick"
+        assert memory.recovery_actions[0]["object_id"] == "cube_red"
+
+        # Verify NOT_HOLDING is in failure_codes but place is not in recovery_actions
+        assert "NOT_HOLDING" in memory.failure_codes
+        assert "POSTCONDITION_FAILED" in memory.failure_codes
+
+    def test_recovery_actions_reject_validation_errors(self, temp_traces):
+        """Test that validation errors (rejected preconditions) are not recovery actions."""
+        # Create trace with GRASP_SLIP → rejected place → successful pick
+        trace_file = temp_traces / "validation_error_test.jsonl"
+        with trace_file.open("w") as f:
+            json.dump({"event": "episode_start", "ts": 1234567890.0,
+                      "task": {"name": "pick_place", "instruction": "Pick and place"},
+                      "llm": "OllamaLLMClient", "model": "qwen3"}, f)
+            f.write("\n")
+
+            # Pick attempt - GRASP_SLIP
+            json.dump({"event": "tool_call", "call_id": "call_1", "name": "pick",
+                      "args": {"object_id": "cube_red", "x": 0.1, "y": -0.2}}, f)
+            f.write("\n")
+            json.dump({"event": "env_outcome", "call_id": "call_1",
+                      "outcome": {"ok": False, "failure": {"code": "GRASP_SLIP", "detail": "slipped"}}}, f)
+            f.write("\n")
+
+            # Place attempt immediately after - validation_error NOT_HOLDING
+            json.dump({"event": "tool_call", "call_id": "call_2", "name": "place",
+                      "args": {"x": -0.2, "y": 0.15}}, f)
+            f.write("\n")
+            json.dump({"event": "validation_error", "call_id": "call_2",
+                      "failure": {"code": "NOT_HOLDING", "detail": "gripper empty"}}, f)
+            f.write("\n")
+
+            # Second pick - SUCCESS
+            json.dump({"event": "tool_call", "call_id": "call_3", "name": "pick",
+                      "args": {"object_id": "cube_red", "x": 0.2, "y": -0.2}}, f)
+            f.write("\n")
+            json.dump({"event": "env_outcome", "call_id": "call_3",
+                      "outcome": {"ok": True, "failure": None}}, f)
+            f.write("\n")
+            json.dump({"event": "verify", "call_id": "call_3", "ok": True, "failure": None}, f)
+            f.write("\n")
+
+            json.dump({"event": "goal_check", "passed": True}, f)
+            f.write("\n")
+            json.dump({"event": "episode_end", "result": {"success": True, "reason": "goal_met"}}, f)
+            f.write("\n")
+
+        index_path = temp_traces / ".test_index.json"
+        store = MemoryStore(trace_dirs=[temp_traces], index_path=index_path)
+        store.index_episodes()
+
+        memory = store.memories[0]
+
+        # Should ONLY have the successful pick (call_3)
+        # The rejected place (call_2) should NOT be in recovery_actions
+        assert len(memory.recovery_actions) == 1
+        assert memory.recovery_actions[0]["name"] == "pick"
+
+        # Both failure codes should be present
+        assert "GRASP_SLIP" in memory.failure_codes
+        assert "NOT_HOLDING" in memory.failure_codes
+
+    def test_recovery_actions_mixed_sequence(self, temp_traces):
+        """Test complex sequence with multiple failures and mixed success/failure recoveries."""
+        trace_file = temp_traces / "mixed_sequence.jsonl"
+        with trace_file.open("w") as f:
+            json.dump({"event": "episode_start", "ts": 1234567890.0,
+                      "task": {"name": "pick_place", "instruction": "Pick and place"},
+                      "llm": "OllamaLLMClient", "model": "qwen3"}, f)
+            f.write("\n")
+
+            # Failure 1: GRASP_SLIP
+            json.dump({"event": "tool_call", "call_id": "c1", "name": "pick",
+                      "args": {"object_id": "cube_red", "x": 0.1, "y": -0.2}}, f)
+            f.write("\n")
+            json.dump({"event": "env_outcome", "call_id": "c1",
+                      "outcome": {"ok": False, "failure": {"code": "GRASP_SLIP"}}}, f)
+            f.write("\n")
+
+            # Recovery attempt 1: observe (successful)
+            json.dump({"event": "tool_call", "call_id": "c2", "name": "observe", "args": {}}, f)
+            f.write("\n")
+            json.dump({"event": "env_outcome", "call_id": "c2",
+                      "outcome": {"ok": True, "failure": None}}, f)
+            f.write("\n")
+
+            # Recovery attempt 2: pick again (POSTCONDITION_FAILED)
+            json.dump({"event": "tool_call", "call_id": "c3", "name": "pick",
+                      "args": {"object_id": "cube_red", "x": 0.2, "y": -0.2}}, f)
+            f.write("\n")
+            json.dump({"event": "env_outcome", "call_id": "c3",
+                      "outcome": {"ok": True, "failure": None}}, f)
+            f.write("\n")
+            json.dump({"event": "verify", "call_id": "c3", "ok": False,
+                      "failure": {"code": "POSTCONDITION_FAILED"}}, f)
+            f.write("\n")
+
+            # Failed recovery attempt: place (NOT_HOLDING)
+            json.dump({"event": "tool_call", "call_id": "c4", "name": "place",
+                      "args": {"x": -0.2, "y": 0.15}}, f)
+            f.write("\n")
+            json.dump({"event": "validation_error", "call_id": "c4",
+                      "failure": {"code": "NOT_HOLDING"}}, f)
+            f.write("\n")
+
+            # Final successful recovery: pick
+            json.dump({"event": "tool_call", "call_id": "c5", "name": "pick",
+                      "args": {"object_id": "cube_red", "x": 0.2, "y": -0.2}}, f)
+            f.write("\n")
+            json.dump({"event": "env_outcome", "call_id": "c5",
+                      "outcome": {"ok": True, "failure": None}}, f)
+            f.write("\n")
+            json.dump({"event": "verify", "call_id": "c5", "ok": True, "failure": None}, f)
+            f.write("\n")
+
+            json.dump({"event": "goal_check", "passed": True}, f)
+            f.write("\n")
+            json.dump({"event": "episode_end", "result": {"success": True, "reason": "goal_met"}}, f)
+            f.write("\n")
+
+        index_path = temp_traces / ".test_index.json"
+        store = MemoryStore(trace_dirs=[temp_traces], index_path=index_path)
+        store.index_episodes()
+
+        memory = store.memories[0]
+
+        # Should have: observe (c2), pick (c5)
+        # Should NOT have: pick (c3, failed postcondition), place (c4, validation error)
+        assert len(memory.recovery_actions) == 2
+        assert memory.recovery_actions[0]["name"] == "observe"
+        assert memory.recovery_actions[1]["name"] == "pick"
+        assert memory.recovery_actions[1]["object_id"] == "cube_red"
+
+        # All failure codes should be present
+        assert "GRASP_SLIP" in memory.failure_codes
+        assert "POSTCONDITION_FAILED" in memory.failure_codes
+        assert "NOT_HOLDING" in memory.failure_codes
+
+
+# --- Recovery-action correlation in the real loop event format (every call ends with tool_result) ---
+
+def _write_episode(trace_dir, name, body_events, success=True):
+    events = [{"event": "episode_start", "ts": 1234567890.0,
+               "task": {"name": "pick_place", "instruction": "Pick and place"},
+               "llm": "OllamaLLMClient", "model": "qwen3"}]
+    events += body_events
+    events += [{"event": "goal_check", "passed": success},
+               {"event": "episode_end",
+                "result": {"success": success, "reason": "goal_met" if success else "max_steps"}}]
+    path = trace_dir / f"{name}.jsonl"
+    path.write_text("\n".join(json.dumps(e) for e in events) + "\n")
+    store = MemoryStore(trace_dirs=[trace_dir], index_path=trace_dir / ".idx.json")
+    store.index_episodes()
+    return next(m for m in store.memories if m.episode_id == name)
+
+
+def _call(cid, name, **args):
+    return {"event": "tool_call", "call_id": cid, "name": name, "args": args}
+
+
+def _skill(cid, ok, verify_ok=True, code=None, attempt=0):
+    """env_outcome + verify, as the loop logs them for an executed skill attempt."""
+    fail = {"code": code, "detail": "x"} if code else None
+    evs = [{"event": "env_outcome", "call_id": cid, "attempt": attempt,
+            "outcome": {"ok": ok, "failure": None if ok else fail}}]
+    evs.append({"event": "verify", "call_id": cid, "attempt": attempt,
+                "ok": ok and verify_ok, "failure": None if (ok and verify_ok) else fail})
+    return evs
+
+
+def _result(cid, ok, code=None):
+    return {"event": "tool_result", "call_id": cid, "ok": ok,
+            "error": {"code": code, "detail": "x"} if code else None}
+
+
+def test_recovery_observe_known_only_from_tool_result(temp_traces):
+    """observe has no env_outcome/verify; its tool_result alone marks it successful."""
+    m = _write_episode(temp_traces, "obs_only", [
+        _call("c1", "pick", object_id="cube_red", x=0.1, y=-0.2),
+        *_skill("c1", False, code="GRASP_SLIP"), _result("c1", False, "GRASP_SLIP"),
+        _call("c2", "observe"), _result("c2", True),
+    ], success=False)
+    assert m.recovery_actions == [{"name": "observe"}]
+
+
+def test_retry_succeeding_under_same_call_id_is_not_a_failure_or_recovery(temp_traces):
+    """Loop-internal retry: attempt 0 fails, attempt 1 succeeds, same call_id; final outcome is success."""
+    m = _write_episode(temp_traces, "retry_ok", [
+        _call("c1", "pick", object_id="cube_red", x=0.1, y=-0.2),
+        *_skill("c1", False, code="GRASP_SLIP", attempt=0),
+        {"event": "retry", "call_id": "c1", "attempt": 1, "reason": "GRASP_SLIP"},
+        *_skill("c1", True, attempt=1), _result("c1", True),
+        _call("c2", "place", x=-0.2, y=0.15), *_skill("c2", True), _result("c2", True),
+    ])
+    assert m.recovery_actions == []
+    assert "GRASP_SLIP" in m.failure_codes  # the fault is still reported
+
+
+def test_retry_exhausted_then_new_successful_pick_is_recovery(temp_traces):
+    m = _write_episode(temp_traces, "retry_fail", [
+        _call("c1", "pick", object_id="cube_red", x=0.1, y=-0.2),
+        *_skill("c1", False, code="GRASP_SLIP", attempt=0),
+        {"event": "retry", "call_id": "c1", "attempt": 1, "reason": "GRASP_SLIP"},
+        *_skill("c1", False, code="GRASP_SLIP", attempt=1), _result("c1", False, "GRASP_SLIP"),
+        _call("c2", "pick", object_id="cube_red", x=0.2, y=-0.2), *_skill("c2", True), _result("c2", True),
+    ])
+    assert m.recovery_actions == [{"name": "pick", "object_id": "cube_red"}]
+
+
+def test_skipped_call_is_not_a_recovery(temp_traces):
+    """A call skipped because an earlier call in the same turn failed is a failure, not a recovery."""
+    m = _write_episode(temp_traces, "skipped", [
+        _call("c1", "pick", object_id="cube_red", x=0.1, y=-0.2),
+        *_skill("c1", False, code="GRASP_SLIP"), _result("c1", False, "GRASP_SLIP"),
+        {"event": "tool_call", "call_id": "c2", "name": "place", "args": {"x": -0.2, "y": 0.15}, "skipped": True},
+        _result("c2", False, "SKIPPED"),
+        _call("c3", "pick", object_id="cube_red", x=0.2, y=-0.2), *_skill("c3", True), _result("c3", True),
+    ])
+    assert m.recovery_actions == [{"name": "pick", "object_id": "cube_red"}]
+
+
+def test_tool_call_without_call_id_is_never_recorded(temp_traces):
+    m = _write_episode(temp_traces, "no_id", [
+        _call("c1", "pick", object_id="cube_red", x=0.1, y=-0.2),
+        *_skill("c1", False, code="GRASP_SLIP"), _result("c1", False, "GRASP_SLIP"),
+        {"event": "tool_call", "name": "observe", "args": {}},
+        {"event": "tool_result", "ok": True, "error": None},
+    ], success=False)
+    assert m.recovery_actions == []
+
+
+def test_failures_followed_only_by_failures_record_nothing(temp_traces):
+    m = _write_episode(temp_traces, "all_fail", [
+        _call("c1", "pick", object_id="cube_red", x=0.1, y=-0.2),
+        *_skill("c1", True, verify_ok=False, code="POSTCONDITION_FAILED"),
+        _result("c1", False, "POSTCONDITION_FAILED"),
+        _call("c2", "place", x=-0.2, y=0.15),
+        {"event": "validation_error", "call_id": "c2", "failure": {"code": "NOT_HOLDING", "detail": "x"}},
+        _result("c2", False, "NOT_HOLDING"),
+    ], success=False)
+    assert m.recovery_actions == []
+    assert {"POSTCONDITION_FAILED", "NOT_HOLDING"} <= set(m.failure_codes)

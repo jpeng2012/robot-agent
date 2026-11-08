@@ -239,30 +239,69 @@ class MemoryStore:
                     if text and text not in llm_reasoning:
                         llm_reasoning.append(text)
 
-            # Collect recovery actions (tool calls after failures)
+            # Collect recovery actions (only successful actions after failures)
+            # Build call_id -> success mapping
+            call_outcomes = {}  # call_id -> bool (True if successful)
+            for event in events:
+                call_id = event.get("call_id")
+                if not call_id:
+                    continue
+
+                if event["event"] == "validation_error":
+                    # Precondition failure - action rejected before execution
+                    call_outcomes[call_id] = False
+                elif event["event"] == "env_outcome":
+                    # Environment execution result
+                    outcome = event.get("outcome", {})
+                    call_outcomes[call_id] = outcome.get("ok", False)
+                elif event["event"] == "verify":
+                    # Postcondition check result
+                    # Only override if env_outcome was successful
+                    if call_outcomes.get(call_id, True):
+                        call_outcomes[call_id] = event.get("ok", False)
+                elif event["event"] == "tool_result":
+                    # Final result (for actions without env_outcome like observe)
+                    # Only set if not already determined by env_outcome/verify/validation_error
+                    if call_id not in call_outcomes:
+                        call_outcomes[call_id] = event.get("ok", False)
+
+            # Track failures and find successful recoveries
             recovery_actions = []
+            failure_call_ids = set()
+
+            for event in events:
+                call_id = event.get("call_id")
+                if not call_id:
+                    continue
+
+                # Mark failed actions
+                if call_id in call_outcomes and not call_outcomes[call_id]:
+                    failure_call_ids.add(call_id)
+
+            # Find tool calls that occurred after failures and succeeded
             prev_failed = False
-            for i, event in enumerate(events):
-                # Track if previous action failed
-                if event["event"] in ("env_outcome", "verify", "validation_error"):
-                    if event["event"] == "env_outcome":
-                        prev_failed = not event.get("outcome", {}).get("ok", True)
-                    elif event["event"] == "verify":
-                        prev_failed = not event.get("ok", True)
-                    elif event["event"] == "validation_error":
-                        prev_failed = True
+            for event in events:
+                call_id = event.get("call_id")
 
-                # If this is a tool call after failure, it's a recovery attempt
+                # Check if we just encountered a failure
+                if call_id and call_id in failure_call_ids:
+                    prev_failed = True
+
+                # If this is a tool call after failure, check if it succeeded
                 if event["event"] == "tool_call" and prev_failed:
-                    # Coordinate-free: only store action name and object_id (no args, no schema)
-                    tool_call = {"name": event.get("name")}
+                    call_id = event.get("call_id")
 
-                    # Preserve object_id if present (safe, no coordinates)
-                    if "object_id" in event.get("args", {}):
-                        tool_call["object_id"] = event["args"]["object_id"]
+                    # Only record if this action succeeded
+                    if call_id and call_outcomes.get(call_id, False):
+                        # Coordinate-free: only store action name and object_id
+                        tool_call = {"name": event.get("name")}
 
-                    recovery_actions.append(tool_call)
-                    prev_failed = False  # Reset after recording recovery
+                        # Preserve object_id if present (safe, no coordinates)
+                        if "object_id" in event.get("args", {}):
+                            tool_call["object_id"] = event["args"]["object_id"]
+
+                        recovery_actions.append(tool_call)
+                        prev_failed = False  # Reset after successful recovery
 
             # Build provenance
             provenance = {
