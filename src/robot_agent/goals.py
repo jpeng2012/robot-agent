@@ -2,7 +2,7 @@
 
 from pydantic import BaseModel
 
-from robot_agent.world import WorldState
+from robot_agent.world import REGION_HALF, WorldState
 
 
 class On(BaseModel):
@@ -77,4 +77,21 @@ def region_pick_place_task() -> TaskSpec:
         instruction="Put the red cube inside the green target region.",
         layout={"cube_red": ("cube", 0.0, -0.02), "target": ("target_region", 0.05, 0.30)},
         goal=[InRegion(obj="cube_red", region="target", half_x=0.045, half_y=0.045)],
+    )
+
+
+def clear_target_task() -> TaskSpec:
+    """F011: the blue cube occupies the target, so it must be moved to parking before red goes in."""
+    return TaskSpec(
+        name="clear_target",
+        instruction=("Put the red cube in the target region and the blue cube in the parking region. "
+                     "The blue cube currently occupies the target region."),
+        layout={
+            "target": ("target_region", 0.05, 0.30),
+            "cube_blue": ("cube", 0.05, 0.30),
+            "parking": ("target_region", -0.25, 0.30),
+            "cube_red": ("cube", 0.10, -0.20),
+        },
+        goal=[InRegion(obj="cube_blue", region="parking", half_x=REGION_HALF, half_y=REGION_HALF),
+              InRegion(obj="cube_red", region="target", half_x=REGION_HALF, half_y=REGION_HALF)],
     )

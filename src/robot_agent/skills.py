@@ -11,7 +11,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from robot_agent.env import GRASP_TOL
-from robot_agent.world import WORKSPACE, Failure, FailureCode, SkillOutcome, WorldState
+from robot_agent.world import WORKSPACE, Failure, FailureCode, SkillOutcome, WorldState, placement_conflict
 
 PLACE_TOL = 0.02
 CARRY_XY_TOL = 0.05  # max XY distance between held object and gripper, metres
@@ -99,6 +99,8 @@ def _pick_post(before: WorldState, after: WorldState, a: PickArgs) -> Failure | 
 def _place_pre(s: WorldState, a: PlaceArgs) -> Failure | None:
     if s.gripper.holding is None:
         return Failure(code=FailureCode.NOT_HOLDING, detail="gripper is empty")
+    if (why := placement_conflict(s, s.gripper.holding, a.x, a.y)) is not None:
+        return Failure(code=FailureCode.DESTINATION_OCCUPIED, detail=why)
     return None
 
 

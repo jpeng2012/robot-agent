@@ -1,5 +1,45 @@
 # Robot-Agent Development Progress
 
+## Session 2026-11-08: F011a — multi-object occupancy and clear-target task (mock)
+
+### Changes
+- world.py: FailureCode.DESTINATION_OCCUPIED; CUBE_HALF 0.02, REGION_HALF 0.045; pure
+  placement_conflict(): R2 region capacity first (target_region box already holding another cube's
+  centre, same strict test as InRegion), then R1 cube footprint non-overlap. Held cube ignored; only
+  cubes are solid.
+- skills.py: _place_pre runs the check after NOT_HOLDING. env.py: MockTabletopEnv._place runs it on the
+  live scene before release; _pick refuses non-cube objects ("'<id>' is not graspable").
+- goals.py: clear_target_task() (blue in target, red elsewhere, parking empty; goal blue in parking AND
+  red in target). Order follows from region capacity; no ordering predicate.
+- tests/test_clear_target.py: 21 deterministic ScriptedLLM tests with an overlap/capacity invariant on
+  every traced state.
+- Unchanged: F010 grounding, tool schemas, policy classes, SYSTEM_PROMPT, memory, robosuite worker.
+
+### Verification
+```bash
+pytest tests/ -q -m "not requires_server"   # 149 passed, 17 skipped, 3 deselected
+ROBOT_AGENT_ROBOSUITE_PYTHON=~/miniconda3/envs/robot_policy/bin/python pytest tests/test_robosuite_env.py -q  # 22 passed
+```
+- Mutations (each fails its targeted tests; sources restored identically): env check off; precondition
+  off; held cube not excluded; plates/regions as obstacles; R2 removed; release before check (first
+  attempt never released at all, redone faithfully); code made transient (caught by a direct pin, since
+  no scenario can expose a retry); non-cube picks allowed.
+- Evidence (gitignored): traces/f011a_v1/ (mutations.txt, mutation_m6_redo.txt, nonserver.txt,
+  robosuite.txt).
+
+### Independent review
+- Verdict: commit, with warnings; no correctness defects, within scope.
+- Limitations:
+  - DESTINATION_OCCUPIED pre-empts UNGROUNDED_ACTION for a place chained after a pick into an occupied
+    spot (validation precedes grounding; rejected without motion; untested).
+  - B006: silent_drop_on_place and perturb_at can still create overlapping cubes, region over-capacity
+    or invalid held-object states. Must be resolved before F011b disturbance evaluations.
+  - B004: DESTINATION_OCCUPIED originates from harness validation (validation_error, no motion) or env
+    execution (env_outcome failure); memory treats both alike.
+  - Untested: y-axis boundaries, R2-before-R1 ordering by mutation, gripper pose after a refused
+    non-cube pick, env-side error text, plate inside a region.
+- Deferred to F011b: MultiPickPlacePolicyLLM, planning comparison, evaluation harness, CLI task.
+
 ## Session 2026-11-08: Milestone 1 Phase B2 — robosuite rejection and recovery paths through AgentLoop
 
 ### Changes (tests/test_robosuite_env.py only; no production change)

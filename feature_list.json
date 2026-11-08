@@ -150,6 +150,24 @@
       ],
       "verification": "pytest tests/ -q -rs",
       "notes": "Interfaces unchanged (LLMClient, RobotEnv, SYSTEM_PROMPT, memory retrieval, model settings). Limitations: place destination/support pose is not grounded; pick does not compare holding state, so a contrived same-turn place-then-pick at the carry position passes; requires_grounding keys on an 'x' arg, so future coordinate skills need explicit freshness rules; Grounding.state is a mutable pydantic model that no code mutates; no max state age (needed for real hardware); robosuite tests not run (ROBOT_AGENT_ROBOSUITE_PYTHON unset); once a state is delivered, a guess within GRASP_TOL is indistinguishable from reading it. UNGROUNDED_ACTION enters F009 memory failure codes (see B004)."
+    },
+    {
+      "id": "F011a",
+      "title": "Multi-object occupancy and clear-target task (mock)",
+      "status": "complete",
+      "acceptance": [
+        "FailureCode.DESTINATION_OCCUPIED (not TRANSIENT) and a pure world.placement_conflict(state, held, x, y)",
+        "R2 region capacity (checked first): a target_region whose box (strict <, REGION_HALF=0.045, same test as goals.InRegion) already contains another cube's centre cannot receive a cube",
+        "R1 non-overlap: a cube footprint (CUBE_HALF=0.02) may not overlap another resting cube; the held cube is ignored (it can be put back where it came from); only cubes are solid, plates and regions are never obstacles",
+        "Occupancy checked in skills._place_pre after NOT_HOLDING (NOT_HOLDING precedence preserved) and in MockTabletopEnv._place on the live scene before release; a rejected place leaves the cube held and poses/gripper unchanged (the mock still advances step/t, existing convention)",
+        "Mock graspability: MockTabletopEnv._pick rejects non-cube objects with UNKNOWN_OBJECT \"'<id>' is not graspable\" (robosuite worker wording); shared validation layer unchanged",
+        "goals.clear_target_task(): cube_blue starts in target (0.05, 0.30), parking (-0.25, 0.30) empty, cube_red at (0.10, -0.20); goal [in_region(cube_blue, parking), in_region(cube_red, target)]; no ordering predicate (order follows from region capacity)",
+        "tests/test_clear_target.py (21 tests, ScriptedLLM, overlap/capacity invariant on every traced state): correct order; invalid order rejected with no execute, state identical, red held, then put back at its original pose and recovered; R1/R2 boundaries; parking capacity; NOT_HOLDING precedence; premature finish unmet lists; env-side conflict after a perturbation inside execute; non-cube picks refused; pick_place and region_pick_place unchanged; REGION_HALF pinned",
+        "Mutations (traces/f011a_v1/): env check off, precondition off, held cube not excluded, plates/regions as obstacles, R2 removed, release before check (redone faithfully), code made transient, non-cube picks allowed — each fails its targeted tests",
+        "Non-server suite 149 passed, 17 skipped, 3 deselected; robosuite suite 22 passed"
+      ],
+      "verification": "pytest tests/test_clear_target.py -v && pytest tests/ -q -m 'not requires_server'",
+      "notes": "Unchanged: F010 grounding, tool schemas, policy classes, SYSTEM_PROMPT, memory, robosuite worker. Limitations: (a) DESTINATION_OCCUPIED from the precondition pre-empts UNGROUNDED_ACTION for a place chained after a pick into an occupied spot (validation precedes grounding; still rejected without motion; untested); (b) fault fixtures can still create impossible states (B006); (c) DESTINATION_OCCUPIED originates from harness validation or env execution (B004); (d) untested: y-axis boundaries, R2-before-R1 ordering by mutation, gripper pose after a refused non-cube pick, env-side error text, plate inside a region. Deferred to F011b: MultiPickPlacePolicyLLM, planning comparison, evaluation harness, CLI task."
     }
   ],
   "backlog": [
@@ -201,7 +219,7 @@
       ],
       "verification": "pytest tests/test_memory.py -q",
       "blockers": "Needs a design decision; memory parser change deferred (not part of F010)",
-      "notes": "F010 logs UNGROUNDED_ACTION as validation_error, so the F009 parser adds it to failure_codes and records the next independently successful call (usually observe) as a recovery action."
+      "notes": "F010 logs UNGROUNDED_ACTION as validation_error, so the F009 parser adds it to failure_codes and records the next independently successful call (usually observe) as a recovery action. F011a: DESTINATION_OCCUPIED can originate from harness validation (skills._place_pre, logged as validation_error, no motion) or from environment execution (MockTabletopEnv._place, env_outcome failure); memory adds it to failure_codes either way and records the next success as a recovery, so classification must be by layer, not by code."
     },
     {
       "id": "B005",
@@ -219,11 +237,24 @@
       "verification": "ROBOT_AGENT_ROBOSUITE_PYTHON=~/miniconda3/envs/robot_policy/bin/python pytest tests/test_robosuite_env.py -v",
       "blockers": "Most items need fault injection, a cube displacement path, or worker/loop changes; out of scope for Phase B2",
       "notes": "Recorded after Phase B2. Place-argument checks cannot detect a hard-coded place because the target pose is a layout constant; a hard-coded seed-0 pick fails only by a ~1.6e-19 settle residue."
+    },
+    {
+      "id": "B006",
+      "title": "Mock fault fixtures can create physically impossible states",
+      "status": "open",
+      "acceptance": [
+        "silent_drop_on_place landing point respects cube non-overlap and region capacity (or the fixture refuses such configurations)",
+        "perturb_at cannot move a cube onto another cube, put a second cube into a target_region, or move the held object while it is held",
+        "Deterministic tests for each guarded case"
+      ],
+      "verification": "pytest tests/test_clear_target.py tests/test_env.py -q",
+      "blockers": "Must be resolved before F011b disturbance evaluations",
+      "notes": "Found in the F011a review: env.py applies perturb_at poses and the silent-drop landing point without occupancy checks; current test schedules do not trigger these cases."
     }
   ],
   "meta": {
     "last_updated": "2026-11-07",
     "baseline_commit": "45cd36b",
-    "baseline_test_status": "non-server 128 passed, 17 skipped, 3 deselected; robosuite file 22 passed with ROBOT_AGENT_ROBOSUITE_PYTHON set; full suite with local Ollama 131 passed, 5 skipped (F010)"
+    "baseline_test_status": "non-server 149 passed, 17 skipped, 3 deselected (F011a); robosuite file 22 passed with ROBOT_AGENT_ROBOSUITE_PYTHON set; full suite with local Ollama 131 passed, 5 skipped (F010)"
   }
 }

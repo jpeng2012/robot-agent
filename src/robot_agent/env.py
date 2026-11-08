@@ -17,6 +17,7 @@ from robot_agent.world import (
     Pose,
     SkillOutcome,
     WorldState,
+    placement_conflict,
 )
 
 GRASP_TOL = 0.02  # max xy error between commanded pick point and object, metres
@@ -98,6 +99,8 @@ class MockTabletopEnv:
             return _fail(FailureCode.ALREADY_HOLDING, f"already holding {self.holding}")
         if oid not in self.poses:
             return _fail(FailureCode.UNKNOWN_OBJECT, f"no object {oid!r}")
+        if self.kinds[oid] != "cube":  # same rule and wording as the robosuite worker
+            return _fail(FailureCode.UNKNOWN_OBJECT, f"{oid!r} is not graspable")
         self.gripper = Pose(x=x, y=y, z=0.0)
         err = self.poses[oid].dist_xy(x, y)
         if err > GRASP_TOL:
@@ -117,6 +120,10 @@ class MockTabletopEnv:
     def _place(self, x: float, y: float) -> SkillOutcome:
         if self.holding is None:
             return _fail(FailureCode.NOT_HOLDING, "gripper is empty")
+        # Checked on the live scene before releasing, so changes made after validation (e.g. a
+        # perturbation inside execute) cannot produce overlapping cubes; the cube stays held.
+        if (why := placement_conflict(self.observe(), self.holding, x, y)) is not None:
+            return _fail(FailureCode.DESTINATION_OCCUPIED, why)
         oid, self.holding = self.holding, None
         self.gripper = Pose(x=x, y=y, z=CARRY_Z)
         if self._silent_drop is not None:
