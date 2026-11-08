@@ -1,5 +1,58 @@
 # Robot-Agent Development Progress
 
+## Session 2026-11-07: Milestone 1 Phases A and B1 — robosuite baseline and seeded resets
+
+### Phase A (no code changes)
+- First recorded run of the robosuite tests: 10/10 passed (4 @sim) with
+  ROBOT_AGENT_ROBOSUITE_PYTHON=~/miniconda3/envs/robot_policy/bin/python. Only
+  test_rule_based_agent_loop_succeeds goes through AgentLoop; the other @sim tests call the env directly.
+- Evidence: traces/robosuite_phaseA_v1/ (pytest output + the single AgentLoop trace).
+- Review finding: the worker's np.random.seed had no effect; robosuite 1.5.2 draws cube size and
+  robot init-joint noise from env.rng, and the placement sampler has its own generator.
+
+### Phase B1 changes
+- robosuite_worker.py: every reset installs fresh generators for env.rng and the placement sampler
+  (independent SeedSequence(seed).spawn(2) streams when seeded; unseeded default_rng() otherwise, so
+  seed=None never replays an earlier seed). backend_info gains `init` (seed, installed RNG source and
+  entropy, robot_init_qpos pre-settle, cube size, z_ref, post-settle cube/eef poses) and `versions`
+  (python, robosuite, mujoco, numpy, sha256 of worker/env/expert sources).
+- tests/test_robosuite_env.py: 4 @sim tests (same seed -> identical realized init; seeds vary joints
+  and cube size; seed=None installs fresh unseeded generators, checked via recorded RNG metadata rather
+  than sample differences; versions/hashes recorded). All 4 fail on the pre-change worker; the
+  seed=None test fails when the None branch keeps the previous generators (mutation run recorded in
+  traces/robosuite_phaseB1_v2/test_evidence.txt).
+
+### Evidence (traces/robosuite_phaseB1_v2/; v1 superseded)
+- init_repro/: same seed -> identical realized initial state and observed state across two fresh
+  worker processes; seed 0 identical first or after seed 1; seeds 0 and 1 differ; seed=None differs
+  across processes, including after seeded resets.
+- baseline/results.json: 10 seeded AgentLoop episodes (PickPlacePolicyLLM, region_pick_place, one
+  fresh worker per episode) + repeats of seeds 0 and 3. Worker sha256 a6f2a01f... recorded in every
+  episode; `sha256sum src/robot_agent/robosuite_worker.py` and `git diff HEAD -- src/ | sha256sum`
+  (27f7d45c...) were checked equal to the recorded values before commit. robot-policy-learning 2c9ec6a,
+  tracked files clean. Harness robosuite_baseline.py (uncommitted) sha256 86dc33ad...; repro_check.py
+  sha256 4e7fc74f....
+- All 12 episodes (10 distinct seeds + repeats of 0 and 3): goal_met, one pick and one place attempt, 0 retries, 0 failures, 0 F007 rejections, both
+  F010 checks ok. Over the 10 distinct seeds: pick gripper-cube XY 0.000796-0.001145 m (mean 0.000899); cube z after pick
+  0.1017-0.1019 (agent frame); episode control steps 325-357.
+- Same seed reproduces the observed initial state (seeds 0 and 1, two processes; seed 0 also after
+  seed 1). For seeds 0 and 3 (one repeat each) it reproduces the recorded skill endpoints and every
+  other recorded event except call ids and timing. Complete per-control-step trajectories were not
+  compared, so full trajectory determinism is not claimed. One machine, mujoco 3.3.5.
+
+### Verification
+```bash
+ROBOT_AGENT_ROBOSUITE_PYTHON=~/miniconda3/envs/robot_policy/bin/python pytest tests/test_robosuite_env.py -q  # 14 passed
+pytest tests/ -q -m "not requires_server"   # 128 passed, 9 skipped, 3 deselected
+```
+
+### Limitations
+- n=10, one fixed layout (layout fixes cube/target poses; seeds vary cube size and joint noise only),
+  deterministic scripted policy; no statistical claim. No failure path exercised on robosuite.
+- F007 z check cannot fire after a worker-ok pick; F010 checks passing do not show enforcement.
+- Place-phase gripper-cube XY is post-release, not a grasp measurement.
+- Worker log deleted on close; env exceptions not caught by AgentLoop; no worker RPC timeout.
+
 ## Session 2026-11-07: F010 Observation-grounding contract
 
 ### Changes

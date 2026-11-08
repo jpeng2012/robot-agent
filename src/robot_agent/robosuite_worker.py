@@ -12,8 +12,10 @@ height (table top + cube half-height). An object resting on the table therefore 
 matching the mock's convention, and the target region is reported at z = 0.
 """
 
+import hashlib
 import json
 import os
+import platform
 import sys
 import traceback
 
@@ -40,6 +42,24 @@ def _l(v):
     return [float(x) for x in v]
 
 
+
+def _sha256(path):
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
+def _versions():
+    import mujoco
+    import robosuite
+    import envs.constrained_pick_place as env_mod
+    import experts.constrained_pick_place_expert as expert_mod
+    files = {"worker": os.path.abspath(__file__), "env": env_mod.__file__, "expert": expert_mod.__file__}
+    return {
+        "python": platform.python_version(), "robosuite": robosuite.__version__,
+        "mujoco": mujoco.__version__, "numpy": np.__version__,
+        "files": {k: {"path": v, "sha256": _sha256(v)} for k, v in files.items()},
+    }
+
 class Backend:
     def __init__(self, render=False):
         sampler = UniformRandomSampler(  # same sampler as the demo collector; reset() overrides the pose
@@ -54,6 +74,8 @@ class Backend:
         )
         assert self.env.action_dim == 7, self.env.action_dim
         self.render = render
+        self.init = None  # realized initial conditions of the last reset
+        self.n_resets = 0
 
     # ---------------------------------------------------------------- state
 
@@ -64,6 +86,7 @@ class Backend:
             "cube_half_size": _l(e.cube.size), "target_half_size": _l(e.target_half_size),
             "barrier_pos": _l(e.barrier_pos), "barrier_half_size": _l(e.barrier_half_size),
             "control_freq": e.control_freq, "controller": type(e.robots[0].composite_controller).__name__,
+            "init": self.init, "versions": _versions(),
         }
 
     def _grasped(self):
@@ -83,17 +106,43 @@ class Backend:
         regions = [k for k, (kind, _, _) in layout.items() if kind == "target_region"]
         if len(cubes) != 1 or len(regions) != 1 or len(layout) != 2:
             raise ValueError(f"robosuite backend supports exactly one cube and one target_region, got {layout}")
+        e = self.env
+        # robosuite 1.5.2 does not use the global numpy RNG: the cube size (drawn in _load_model on every
+        # hard reset) and robot init-joint noise (_reset_internal) come from env.rng, and the placement
+        # sampler has its own generator. Give both fresh generators on every reset: seeded, independent
+        # streams when a seed is given, unseeded otherwise (so seed=None never replays an earlier seed).
         if seed is not None:
             np.random.seed(seed)
+            env_ss, sampler_ss = np.random.SeedSequence(seed).spawn(2)
+            e.rng, e.placement_initializer.rng = np.random.default_rng(env_ss), np.random.default_rng(sampler_ss)
+        else:
+            e.rng, e.placement_initializer.rng = np.random.default_rng(), np.random.default_rng()
+        e.seed = seed
+        self.n_resets += 1
+        rng_meta = {  # which generators this reset installed (fresh on every reset)
+            "source": "seed" if seed is not None else "os_entropy", "installed_at_reset": self.n_resets,
+            **{f"{name}_seed_seq": {"entropy": str(g.bit_generator.seed_seq.entropy),
+                                    "spawn_key": list(g.bit_generator.seed_seq.spawn_key)}
+               for name, g in (("env", e.rng), ("sampler", e.placement_initializer.rng))},
+        }
         self.cube_id, self.region_id = cubes[0], regions[0]
-        e = self.env
         e.reset()
+        robot = e.robots[0]
+        init_qpos = _l(e.sim.data.qpos[robot._ref_joint_pos_indexes])  # after init noise, before settling
         self.z_ref = float(e.table_offset[2] + e.cube.size[2])
         _, cx, cy = layout[self.cube_id]
         _, tx, ty = layout[self.region_id]
         e.sim.data.set_joint_qpos(e.cube.joints[0], np.array([cx, cy, self.z_ref, 1.0, 0.0, 0.0, 0.0]))
         e.set_target([tx, ty, self.z_ref])  # calls sim.forward()
         self._settle(5)
+        # Realized initial conditions, so episodes can be compared and reproduced. robot_init_qpos is
+        # taken right after reset (with init noise, before settling); poses are after the 5 settle steps.
+        self.init = {
+            "seed": seed, "seeded": seed is not None, "rng": rng_meta, "robot_init_qpos": init_qpos,
+            "cube_half_size": _l(e.cube.size), "z_ref": float(e.table_offset[2] + e.cube.size[2]),
+            "cube_pose_world": _l(self.obs["cube_pos"]), "cube_quat": _l(self.obs["cube_quat"]),
+            "eef_pose_world": _l(self.obs["robot0_eef_pos"]),
+        }
         self.t0 = float(e.sim.data.time)
         self.step = 0
         self.ctx = None

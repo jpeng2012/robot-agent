@@ -90,3 +90,54 @@ def test_rule_based_agent_loop_succeeds(env, tmp_path):
     result = AgentLoop(env, PickPlacePolicyLLM("cube_red", "target", tol=0.02), trace_dir=tmp_path).run(task, seed=0)
     assert result.success and result.reason == "goal_met", result
     assert result.failures == 0 and result.skills_executed == 2
+
+
+# --- Seeded resets (Milestone 1 Phase B1) ---
+
+def _init(env, seed):
+    env.reset(region_pick_place_task(), seed=seed)
+    return env.backend_info["init"]
+
+
+@sim
+def test_same_seed_gives_identical_initial_conditions(env):
+    a, b = _init(env, 0), _init(env, 0)
+    assert a["rng"]["installed_at_reset"] == b["rng"]["installed_at_reset"] - 1
+    ra, rb = a.pop("rng"), b.pop("rng")  # reset counter differs by design; everything else must match
+    ra.pop("installed_at_reset"); rb.pop("installed_at_reset")
+    assert ra == rb and ra["source"] == "seed"
+    assert a == b and a["seeded"] is True and a["seed"] == 0
+
+
+@sim
+def test_different_seeds_vary_robot_joints_and_cube_size(env):
+    a, b = _init(env, 0), _init(env, 1)
+    assert a["robot_init_qpos"] != b["robot_init_qpos"]
+    assert a["cube_half_size"] != b["cube_half_size"]
+
+
+@sim
+def test_unseeded_reset_after_seeded_reset_installs_fresh_unseeded_generators(env):
+    # Checks what the worker installed, not that two random samples happen to differ.
+    seeded = _init(env, 0)
+    u1, u2 = _init(env, None), _init(env, None)
+    for u in (u1, u2):
+        assert u["seeded"] is False and u["seed"] is None and u["rng"]["source"] == "os_entropy"
+        for g in ("env_seed_seq", "sampler_seed_seq"):
+            assert u["rng"][g]["entropy"] != seeded["rng"][g]["entropy"] and u["rng"][g]["spawn_key"] == []
+    assert u2["rng"]["installed_at_reset"] == u1["rng"]["installed_at_reset"] + 1
+    assert u1["rng"]["env_seed_seq"] != u2["rng"]["env_seed_seq"]  # new generators, not the previous ones
+    assert u1["rng"]["sampler_seed_seq"] != u2["rng"]["sampler_seed_seq"]
+    assert seeded["rng"]["source"] == "seed" and seeded["rng"]["env_seed_seq"]["entropy"] == "0"
+    assert seeded["rng"]["env_seed_seq"]["spawn_key"] != seeded["rng"]["sampler_seed_seq"]["spawn_key"]
+
+
+@sim
+def test_backend_info_records_versions_and_source_hashes(env):
+    env.reset(region_pick_place_task(), seed=0)
+    v = env.backend_info["versions"]
+    assert {"python", "robosuite", "mujoco", "numpy", "files"} <= set(v)
+    assert set(v["files"]) == {"worker", "env", "expert"}
+    assert all(len(f["sha256"]) == 64 for f in v["files"].values())
+    assert {"robot_init_qpos", "cube_half_size", "z_ref", "cube_pose_world", "eef_pose_world"} \
+        <= set(env.backend_info["init"])

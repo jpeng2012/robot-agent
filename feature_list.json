@@ -43,14 +43,16 @@
       "title": "Robosuite physics backend via subprocess bridge",
       "status": "complete",
       "acceptance": [
-        "test_robosuite_env.py passes (7/11 tests, 4 skip requires robosuite)",
+        "test_robosuite_env.py: 14 tests (6 always-run goal-predicate tests + 8 @sim tests); all 14 pass with ROBOT_AGENT_ROBOSUITE_PYTHON=~/miniconda3/envs/robot_policy/bin/python (Python 3.10.20, robosuite 1.5.2, mujoco 3.3.5, numpy 1.26.4); @sim tests skip when the variable is unset",
         "Python 3.10 worker isolation",
         "Coordinate frame alignment (z=0 at rest)",
-        "OSC controller at 10Hz",
-        "Region-based goal checking"
+        "CompositeController at 10 Hz (arm controller type itself not asserted)",
+        "Region-based goal checking",
+        "Seeded resets: robosuite env.rng and the placement sampler get fresh generators on every reset (SeedSequence(seed).spawn(2) when seeded, unseeded default_rng() otherwise); same seed reproduces the observed initial state across fresh worker processes",
+        "backend_info records realized initial conditions (seed, installed RNG source/entropy, robot_init_qpos, cube size, z_ref, settled cube/eef poses) and python/robosuite/mujoco/numpy versions with sha256 of the worker, env and expert sources"
       ],
-      "verification": "pytest tests/test_robosuite_env.py -v -k 'not requires_robosuite'",
-      "notes": "Commit 45cd36b. Full verification requires robosuite installation"
+      "verification": "ROBOT_AGENT_ROBOSUITE_PYTHON=~/miniconda3/envs/robot_policy/bin/python pytest tests/test_robosuite_env.py -v",
+      "notes": "Commit 45cd36b; seeded resets in Milestone 1 Phase B1. Evidence (gitignored): traces/robosuite_phaseA_v1/ (first recorded sim run, pre-seeding), traces/robosuite_phaseB1_v2/ (init reproducibility + 10-seed AgentLoop baseline; traces/robosuite_phaseB1_v1/ superseded). Same seed reproduces the observed initial state (seeds 0 and 1 across two processes) and, for seeds 0 and 3 (one repeat each), the recorded skill endpoints in this environment (one machine, mujoco 3.3.5); complete per-control-step trajectories have not been compared. The layout fixes cube and target poses; seeds vary cube size and robot init-joint noise only. Worker log is deleted on close; env/worker exceptions are not caught by AgentLoop."
     },
     {
       "id": "F005",
@@ -163,28 +165,28 @@
     {
       "id": "B002",
       "title": "Full robosuite integration testing",
-      "status": "blocked",
+      "status": "partial",
       "acceptance": [
-        "All test_robosuite_env.py tests pass",
-        "Document robosuite setup (Python 3.10, MuJoCo license)"
+        "All test_robosuite_env.py tests pass (met 2026-11-07: 14/14 with the robot_policy conda env)",
+        "Document robosuite setup (Python 3.10 conda env with robosuite 1.5.2 and mujoco 3.x, robot-policy-learning installed editable so envs/experts import under -I, ROBOT_AGENT_ROBOSUITE_PYTHON) — not done"
       ],
-      "blockers": "Requires robosuite installation and Python 3.10 environment"
+      "blockers": "Setup documentation outstanding; environment available at ~/miniconda3/envs/robot_policy"
     },
     {
       "id": "B003",
       "title": "Empirical validation of F007 spatial thresholds with Robosuite",
-      "status": "blocked",
+      "status": "partial",
       "acceptance": [
-        "Measure XY distance between gripper and cube during successful Robosuite grasps across 10+ seeds",
-        "Confirm all XY measurements < CARRY_XY_TOL (0.05m)",
-        "Confirm all Z heights > MIN_CARRY_Z (0.05m)",
-        "Compute false-rejection rate: successful grasps rejected by F007 checks",
-        "Report actual XY distance distribution: min, max, mean, p95",
-        "test_direct_pick_then_place_meets_goal passes with F007 active"
+        "Measure gripper–cube XY at successful grasps through AgentLoop (verify/_pick_post active) across 10+ seeded episodes with recorded initial conditions — done for 10 seeds, one fixed layout: min 0.000796, max 0.001145, mean 0.000899 m",
+        "Confirm all XY measurements < CARRY_XY_TOL (0.05 m) — 10/10",
+        "Confirm cube height (agent frame, 0 = resting) after pick > MIN_CARRY_Z (0.05 m) — 10/10 (0.1017–0.1019); note this check cannot fire after a worker-ok pick, which already requires z >= 0.08",
+        "False-rejection rate of F007 on worker-successful grasps — 0/10 (no statistical claim at n=10)",
+        "Repeat over varied reachable cube/target layouts and report the distribution including p95 — not done",
+        "Measure grasps the worker itself rejects (selection bias of worker-ok-only samples) — not done"
       ],
-      "verification": "pytest tests/test_robosuite_env.py::test_direct_pick_then_place_meets_goal -v -s",
-      "blockers": "Requires Robosuite installation and ROBOT_AGENT_ROBOSUITE_PYTHON environment",
-      "notes": "Uses raw observations from independently successful Robosuite grasps (fsm_lifted + grasped + lifted) to validate F007 thresholds don't cause false rejections. Measurements taken from out.info containing eef_pose_world and cube_pose_world."
+      "verification": "ROBOT_AGENT_ROBOSUITE_PYTHON=~/miniconda3/envs/robot_policy/bin/python python robosuite_baseline.py <out> 0 1 2 3 4 5 6 7 8 9 0 3 (evaluation-only script, uncommitted, sha256 86dc33ad...); results in traces/robosuite_phaseB1_v2/baseline/results.json",
+      "blockers": "Layout variation and rejected-grasp measurement outstanding",
+      "notes": "Previous verification target test_direct_pick_then_place_meets_goal bypasses verify/_pick_post, so it never exercised F007. XY is grip_site (robot0_eef_pos) vs cube_pos, identical in WorldState and env_outcome info. Deterministic PickPlacePolicyLLM; F010 checks passing here do not show enforcement (the policy always observes first)."
     },
     {
       "id": "B004",
@@ -204,6 +206,6 @@
   "meta": {
     "last_updated": "2026-11-07",
     "baseline_commit": "45cd36b",
-    "baseline_test_status": "131 passed, 5 skipped (full suite with local Ollama, F010); non-server 128 passed, 5 skipped, 3 deselected"
+    "baseline_test_status": "non-server 128 passed, 9 skipped, 3 deselected; robosuite file 14 passed with ROBOT_AGENT_ROBOSUITE_PYTHON set; full suite with local Ollama 131 passed, 5 skipped (F010)"
   }
 }
