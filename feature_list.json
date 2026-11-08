@@ -168,6 +168,24 @@
       ],
       "verification": "pytest tests/test_clear_target.py -v && pytest tests/ -q -m 'not requires_server'",
       "notes": "Unchanged: F010 grounding, tool schemas, policy classes, SYSTEM_PROMPT, memory, robosuite worker. Limitations: (a) DESTINATION_OCCUPIED from the precondition pre-empts UNGROUNDED_ACTION for a place chained after a pick into an occupied spot (validation precedes grounding; still rejected without motion; untested); (b) fault fixtures can still create impossible states (B006); (c) DESTINATION_OCCUPIED originates from harness validation or env execution (B004); (d) untested: y-axis boundaries, R2-before-R1 ordering by mutation, gripper pose after a refused non-cube pick, env-side error text, plate inside a region. Deferred to F011b: MultiPickPlacePolicyLLM, planning comparison, evaluation harness, CLI task."
+    },
+    {
+      "id": "F011b-1",
+      "title": "Naive vs dependency-aware deterministic policies for clear_target (mock)",
+      "status": "complete",
+      "acceptance": [
+        "src/robot_agent/policies.py: NaivePolicy and DependencyAwarePolicy over one pure decide(latest_state(messages), subgoals, aware); constructor takes InRegion subgoals only (no env, no coordinates); stateless; at most one tool call per turn",
+        "Naive: follows the supplied subgoal order, places at the goal region centre without checking occupancy, repeats a rejected action (bounded by the loop's failure budget)",
+        "Dependency-aware: if the current subgoal's destination is occupied in the delivered state, picks the blocker (stop if the blocker's own subgoal already holds), places it at its own free goal or the nearest valid staging point (0.05 m grid within ±0.45, footprint >= REGION_HALF+CUBE_HALF from every region), then resumes",
+        "clear_target: naive/correct and DA/correct goal_met in 4 executes; naive/reversed failure_budget after 8 validation-layer DESTINATION_OCCUPIED (10 turns, 1 execute); DA/reversed goal_met in the optimal 4 executes with 0 rejections",
+        "Extra layouts: swap (DA stages red at (-0.35, 0.3), 6 executes, optimal), blocker without subgoal (DA stages blue at (-0.05, 0.3)), free target (both follow the supplied order, no false dependency), recovery after a rejected plan (1 rejected plan, reactively recovered, 6 executes)",
+        "tests/test_policies.py (23 tests): independent physical oracle (own footprint geometry + goals.InRegion capacity) on every traced state; grounding provenance for every call (state read = previous tool_result, pick args = delivered pose, place = held cube's own goal centre or valid staging); no env access (constructor signature, synthetic states, layout shift); no hidden state; livelock detector; single-object task matches PickPlacePolicyLLM",
+        "Test-local metrics: success, violations attempted (validation layer) vs env-rejected vs invalid_state_observations, turns, physical executions, successful skills, unnecessary actions (None on failed episodes), proactive clearances computed from the trace vs proactive resolutions from the policy's meta.mode, rejected plans (grouped only when adjacent), unattributed rejections, reactive recoveries",
+        "Mutations (traces/f011b1_v1/): 10, each failing its targeted tests",
+        "Non-server suite 172 passed, 17 skipped, 3 deselected; robosuite suite 22 passed"
+      ],
+      "verification": "pytest tests/test_policies.py -v",
+      "notes": "No changes to AgentLoop, mock env, goal checker, memory, SYSTEM_PROMPT, tool schemas or existing policies; no CLI, live LLM or disturbance (B006) work. Proactive measures differ by design: the trace count is outcome-based (blocker left another object's goal region before any attempt to fill it), meta is decision intent, so naive/correct counts 1 vs 0 and swap 2 vs 1. Deferred limitations: (a) stop paths untested — 'conflicting goals' (needs overlapping regions), 'no valid staging location', 'blocked but no blocking cube', naive 'holding a cube with no subgoal', and the duplicate-object constructor check; (b) a subgoal object or region missing from the delivered state raises KeyError, which AgentLoop reports as llm_error rather than a typed stop; (c) _blocker duplicates placement_conflict geometry and the equivalence test covers only states traced in four layouts (no overlapping regions, boundary cases or two cubes in one region); (d) On-goal tasks unsupported; (e) no evaluation harness or live comparison yet."
     }
   ],
   "backlog": [
@@ -255,6 +273,6 @@
   "meta": {
     "last_updated": "2026-11-07",
     "baseline_commit": "45cd36b",
-    "baseline_test_status": "non-server 149 passed, 17 skipped, 3 deselected (F011a); robosuite file 22 passed with ROBOT_AGENT_ROBOSUITE_PYTHON set; full suite with local Ollama 131 passed, 5 skipped (F010)"
+    "baseline_test_status": "non-server 172 passed, 17 skipped, 3 deselected (F011b-1); robosuite file 22 passed with ROBOT_AGENT_ROBOSUITE_PYTHON set; full suite with local Ollama 131 passed, 5 skipped (F010)"
   }
 }

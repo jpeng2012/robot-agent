@@ -1,5 +1,57 @@
 # Robot-Agent Development Progress
 
+## Session 2026-11-08: F011b-1 — naive vs dependency-aware deterministic policies (mock)
+
+### Changes (new files only)
+- src/robot_agent/policies.py: NaivePolicy and DependencyAwarePolicy over one pure decide() on the latest
+  delivered world_state; InRegion subgoals only, stateless, at most one tool call per turn. DA clears an
+  occupied destination (blocker to its own free goal or a staging point outside every region), then resumes.
+- tests/test_policies.py: 23 tests.
+
+### Behaviour (clear_target unless noted)
+- Naive correct: goal_met, 4 executes. Naive reversed: failure_budget after 8 validation-layer
+  DESTINATION_OCCUPIED (10 turns, 1 execute).
+- DA correct and reversed: goal_met in the optimal 4 executes, 0 rejections.
+- Swap layout: DA stages red at (-0.35, 0.3), 6 executes. Naive: failure_budget.
+- Blocker without subgoal: DA stages blue at (-0.05, 0.3), 4 executes. Naive: failure_budget.
+- Free target, reversed order: both follow the supplied order (no false dependency).
+- Recovery after a scripted rejected plan: DA puts red back, parks blue, places red; 1 rejected plan,
+  reactively recovered, 6 executes, 2 unnecessary actions.
+
+### Verification
+```bash
+pytest tests/test_policies.py -v            # 23 passed
+pytest tests/ -q -m "not requires_server"   # 172 passed, 17 skipped, 3 deselected
+ROBOT_AGENT_ROBOSUITE_PYTHON=~/miniconda3/envs/robot_policy/bin/python pytest tests/test_robosuite_env.py -q  # 22 passed
+```
+- Mutations (each fails its targeted tests; policies.py restored by hash):
+  - DA without the pre-check; staging inside regions; chained pick+place; hard-coded coordinates;
+  - reading the first tool result; always reordering; naive resolving dependencies; hidden state;
+  - changed staging tie-break; naive placing into another subgoal's region.
+- All 10 recorded against the final 23-test suite: mutations_v2.txt (M1-M8) and
+  mutations_followup.txt (M9-M10). mutations.txt holds the earlier run of M1-M8 against the 22-test
+  version.
+- Evidence (gitignored): traces/f011b1_v1/.
+
+### Review findings and corrections
+- First review: commit. Corrections applied, test-only:
+  - staging points pinned;
+  - the recovery test now checks grounding;
+  - place checks require the held cube's own goal region;
+  - unnecessary_actions is None on failed episodes;
+  - violations_executed renamed to invalid_state_observations;
+  - rejection grouping only when adjacent;
+  - unknown-region rejections counted, not raised;
+  - proactive clearance computed from the trace and reported next to the policy's meta.mode count.
+- Deferred limitations:
+  - The stop paths are untested: conflicting goals (needs overlapping regions), no valid staging
+    location, blocked with no blocker, naive holding a cube with no subgoal, and the duplicate-object
+    constructor check.
+  - A subgoal object or region missing from the delivered state raises KeyError, which the loop reports
+    as llm_error.
+  - The _blocker/placement_conflict equivalence is tested only on states traced in four layouts.
+  - On-goal tasks are unsupported; there is no evaluation harness yet.
+
 ## Session 2026-11-08: F011a — multi-object occupancy and clear-target task (mock)
 
 ### Changes
