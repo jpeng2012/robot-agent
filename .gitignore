@@ -5,3 +5,7 @@ traces/
 .pytest_cache/
 uv.lock
 .python-version
+.memory_index.json
+.scan_*.json
+scan_traces.py
+.claude/
