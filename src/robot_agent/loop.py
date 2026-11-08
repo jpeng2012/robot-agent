@@ -1,6 +1,7 @@
 """Reactive observe -> act -> verify loop with bounded retries and goal-gated termination."""
 
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -8,7 +9,8 @@ from pydantic import BaseModel
 from robot_agent.env import RobotEnv
 from robot_agent.goals import TaskSpec, check_goal
 from robot_agent.llm import AssistantTurn, LLMClient, ToolCall
-from robot_agent.skills import precondition, tool_schemas, validate_call, verify
+from robot_agent.skills import (grounding_failure, precondition, requires_grounding, tool_schemas,
+                                 validate_call, verify)
 from robot_agent.trace import Tracer
 from robot_agent.world import TRANSIENT, Failure, FailureCode, WorldState
 
@@ -38,6 +40,18 @@ class EpisodeResult(BaseModel):
     llm_latency_s: float
     wall_time_s: float
     trace_path: Path
+
+
+@dataclass(frozen=True)
+class Grounding:
+    """A world state the loop actually returned to the LLM in a tool result (F010).
+
+    `state` is rebuilt from the serialized world_state that was sent, so it is independent of the
+    message list and of the env. Records are replaced, never mutated.
+    """
+    state: WorldState
+    source_seq: int      # trace seq of the tool_result event that delivered it
+    source_call_id: str  # tool call whose result carried it
 
 
 class AgentLoop:
@@ -70,6 +84,7 @@ class AgentLoop:
     def run(self, task: TaskSpec, seed: int | None = None) -> EpisodeResult:
         self.tracer = Tracer(self.trace_dir, task.name)
         self.retries = self.failures = self.n_tool_calls = 0
+        self._delivered: Grounding | None = None  # per episode; never carried across runs
         self.llm_latency = 0.0
         self.t0 = time.perf_counter()
         state = self.env.reset(task, seed)
@@ -86,6 +101,10 @@ class AgentLoop:
         idle = False
         try:
             for turn_idx in range(self.max_turns):
+                # Grounding snapshot for this turn: every call the LLM returns now was chosen from
+                # what it had been shown before this step; results produced during the turn can only
+                # ground later turns.
+                grounding = self._delivered
                 t = time.perf_counter()
                 try:
                     turn: AssistantTurn = self.llm.step(SYSTEM_PROMPT, messages, tools)
@@ -95,7 +114,9 @@ class AgentLoop:
                 latency = time.perf_counter() - t
                 self.llm_latency += latency
                 self.tracer.log("llm_turn", turn=turn_idx, latency_s=round(latency, 3), text=turn.text,
-                                tool_calls=turn.tool_calls, meta=turn.meta)
+                                tool_calls=turn.tool_calls, meta=turn.meta,
+                                grounding_source_seq=grounding.source_seq if grounding else None,
+                                grounding_step=grounding.state.step if grounding else None)
                 messages.append({"role": "assistant", "text": turn.text, "tool_calls": turn.tool_calls})
                 if not turn.tool_calls:
                     # Real models sometimes narrate an intended action without calling a tool.
@@ -115,13 +136,19 @@ class AgentLoop:
                         content, done = _error(skip, self.env.observe()), False
                         self.tracer.log("tool_call", call_id=tc.id, name=tc.name, args=tc.args, skipped=True)
                     else:
-                        content, done = self._handle(task, tc)
+                        content, done = self._handle(task, tc, grounding)
                         if not content["ok"]:
                             turn_failed = True
                             self.failures += 1
                     self.tracer.log("tool_result", call_id=tc.id, ok=content["ok"], error=content.get("error"),
                                     world_state=content.get("world_state"))
                     messages.append({"role": "tool", "tool_call_id": tc.id, "name": tc.name, "content": content})
+                    if content.get("world_state") is not None:
+                        self._delivered = Grounding(
+                            state=WorldState.model_validate(content["world_state"]),
+                            source_seq=self.tracer.events[-1]["seq"],  # the tool_result just logged
+                            source_call_id=tc.id,
+                        )
                     if done:
                         return self._end(task, True, "goal_met", turn_idx + 1)
                 if self.failures >= self.max_failures:
@@ -130,7 +157,7 @@ class AgentLoop:
         finally:
             self.tracer.close()
 
-    def _handle(self, task: TaskSpec, tc: ToolCall) -> tuple[dict, bool]:
+    def _handle(self, task: TaskSpec, tc: ToolCall, grounding: Grounding | None = None) -> tuple[dict, bool]:
         """Run one tool call. Returns (tool_result content, episode_done)."""
         self.tracer.log("tool_call", call_id=tc.id, name=tc.name, args=tc.args)
         before = self.env.observe()
@@ -138,6 +165,20 @@ class AgentLoop:
         if isinstance(args, Failure):
             self.tracer.log("validation_error", call_id=tc.id, failure=args)
             return _error(args, before), False
+
+        # F010: pose-dependent calls must rest on a state the LLM was shown (after validation, so
+        # existing failure codes keep precedence; checked once per call, so retries are unaffected).
+        if requires_grounding(tc.name):
+            ungrounded = grounding_failure(tc.name, args, grounding.state if grounding else None, before)
+            self.tracer.log("grounding_check", call_id=tc.id, name=tc.name, ok=ungrounded is None,
+                            object_id=getattr(args, "object_id", None),
+                            source_seq=grounding.source_seq if grounding else None,
+                            source_call_id=grounding.source_call_id if grounding else None,
+                            source_step=grounding.state.step if grounding else None,
+                            live_step=before.step, reason=ungrounded.detail if ungrounded else None)
+            if ungrounded is not None:
+                self.tracer.log("validation_error", call_id=tc.id, failure=ungrounded)
+                return _error(ungrounded, before), False
 
         if tc.name == "observe":
             return _ok(before), False

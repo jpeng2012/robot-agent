@@ -132,6 +132,7 @@ def test_premature_finish_rejected_by_goal_check(tmp_path):
 
 def test_silent_failure_cannot_produce_false_success(tmp_path):
     naive = ScriptedLLM([
+        [call("observe")],  # F010: pose-dependent calls need a delivered world state
         [call("pick", object_id="cube_red", x=0.10, y=-0.20)],
         [call("place", x=-0.20, y=0.15)],
         [call("finish", summary="placed it")],
@@ -162,6 +163,7 @@ def test_trace_is_valid_jsonl(tmp_path):
 
 def test_text_only_turn_is_nudged_once(tmp_path):
     llm = ScriptedLLM([
+        [call("observe")],  # F010: pose-dependent calls need a delivered world state
         [call("pick", object_id="cube_red", x=0.10, y=-0.20)],
         [],  # narrates without calling a tool
         [call("place", x=-0.20, y=0.15)],
@@ -193,6 +195,7 @@ def test_pick_postcondition_catches_false_success(tmp_path):
             return SkillOutcome(ok=True)  # Environment reports false success
 
     naive = ScriptedLLM([
+        [call("observe")],  # F010: pose-dependent calls need a delivered world state
         [call("pick", object_id="cube_red", x=0.10, y=-0.20)],
         [call("finish", summary="picked it")],
     ])
@@ -226,6 +229,7 @@ def test_inconsistent_state_holding_without_contact(tmp_path):
             return SkillOutcome(ok=True)
 
     naive = ScriptedLLM([
+        [call("observe")],  # F010: pose-dependent calls need a delivered world state
         [call("pick", object_id="cube_red", x=0.10, y=-0.20)],
         [call("finish", summary="picked it")],
     ])
@@ -257,6 +261,7 @@ def test_pick_postcondition_rejects_object_on_table(tmp_path):
             return SkillOutcome(ok=True)
 
     naive = ScriptedLLM([
+        [call("observe")],  # F010: pose-dependent calls need a delivered world state
         [call("pick", object_id="cube_red", x=0.10, y=-0.20)],
         [call("finish", summary="picked it")],
     ])
@@ -619,3 +624,287 @@ def test_memory_index_reused_across_episodes(tmp_path):
             assert len(index_events) == 1  # Index created on first episode
         else:
             assert len(index_events) == 0  # Reused, not recreated
+
+
+# --- F010: observation grounding for pose-dependent actions ---
+
+PICK = dict(object_id="cube_red", x=0.10, y=-0.20)
+PLACE = dict(x=-0.20, y=0.15)
+
+
+def checks(events):
+    return of(events, "grounding_check")
+
+
+def test_blind_but_correct_pick_is_rejected_before_env(tmp_path):
+    result, env, events = run(tmp_path, llm=ScriptedLLM([[call("pick", **PICK)]]))
+    assert error_codes(events) == ["UNGROUNDED_ACTION"] and env.execute_calls == 0
+    [chk] = checks(events)
+    assert chk["ok"] is False and chk["source_seq"] is None and chk["live_step"] == 0
+    rejection = of(events, "tool_result")[0]
+    assert rejection["world_state"] is not None  # fresh state still returned to the LLM
+
+
+def test_observe_then_pick_place_finish_is_grounded(tmp_path):
+    llm = ScriptedLLM([[call("observe")], [call("pick", **PICK)], [call("place", **PLACE)],
+                       [call("finish", summary="done")]])
+    result, _, events = run(tmp_path, llm=llm)
+    assert result.success and error_codes(events) == []
+    pick_chk, place_chk = checks(events)
+    results = of(events, "tool_result")
+    # Provenance: each check cites the tool_result that delivered its grounding state.
+    assert pick_chk["source_seq"] == results[0]["seq"] and pick_chk["source_call_id"] == results[0]["call_id"]
+    assert place_chk["source_seq"] == results[1]["seq"] and place_chk["source_step"] == 1
+    assert of(events, "llm_turn")[1]["grounding_source_seq"] == results[0]["seq"]
+
+
+def test_failure_state_grounds_corrected_pick_after_perturbation(tmp_path):
+    llm = ScriptedLLM([[call("observe")], [call("pick", **PICK)],
+                       [call("pick", object_id="cube_red", x=0.25, y=0.05)],
+                       [call("place", **PLACE)], [call("finish", summary="done")]])
+    result, _, events = run(tmp_path, llm=llm, faults=Faults(perturb_at={0: ("cube_red", 0.25, 0.05)}))
+    assert result.success and error_codes(events) == ["OBJECT_NOT_AT_POSE"]  # env failure, not UNGROUNDED
+    assert [c["ok"] for c in checks(events)] == [True, True, True]
+
+
+def test_slip_and_nudge_failure_state_grounds_corrected_pick(tmp_path):
+    env = SlipAndNudgeEnv(Faults(fail_once={"pick": FailureCode.GRASP_SLIP}))
+    llm = ScriptedLLM([[call("observe")], [call("pick", **PICK)],
+                       [call("pick", object_id="cube_red", x=0.20, y=-0.20)],
+                       [call("place", **PLACE)], [call("finish", summary="done")]])
+    result, _, events = run(tmp_path, llm=llm, env=env)
+    assert result.success and error_codes(events) == ["GRASP_SLIP"] and of(events, "retry") == []
+
+
+def test_memory_without_observation_does_not_ground(tmp_path):
+    memory_dir = tmp_path / "memory_traces"
+    memory_dir.mkdir()
+    create_sample_successful_trace(memory_dir / "sample_pick_place.jsonl")
+    env = MockTabletopEnv()
+    loop = AgentLoop(env, ScriptedLLM([[call("pick", **PICK)]]), trace_dir=tmp_path / "run",
+                     enable_memory=True, memory_trace_dirs=[memory_dir])
+    loop.run(pick_place_task(), seed=0)
+    events = loop.tracer.events
+    assert of(events, "memory_retrieval")[0]["count"] >= 1
+    assert error_codes(events) == ["UNGROUNDED_ACTION"] and env.execute_calls == 0
+
+
+def test_memory_text_with_coordinates_still_does_not_ground(tmp_path, monkeypatch):
+    from robot_agent.memory import MemoryStore
+    monkeypatch.setattr(MemoryStore, "format_memory", lambda self, m: "cube_red at x=0.10 y=-0.20")
+    memory_dir = tmp_path / "memory_traces"
+    memory_dir.mkdir()
+    create_sample_successful_trace(memory_dir / "sample_pick_place.jsonl")
+    env = MockTabletopEnv()
+    llm = RecordingLLM([[call("pick", **PICK)]])
+    loop = AgentLoop(env, llm, trace_dir=tmp_path / "run", enable_memory=True, memory_trace_dirs=[memory_dir])
+    loop.run(pick_place_task(), seed=0)
+    assert "x=0.10" in llm.recorded_calls[0]["messages"][1]["content"]
+    assert error_codes(loop.tracer.events) == ["UNGROUNDED_ACTION"] and env.execute_calls == 0
+
+
+@pytest.mark.parametrize("first_episode", [
+    [[call("observe")]],                                                        # ends at step 0
+    [[call("observe")], [call("pick", **PICK)], [call("place", **PLACE)], [call("finish", summary="d")]],
+])
+def test_grounding_does_not_carry_across_episodes(tmp_path, first_episode):
+    env = MockTabletopEnv()
+    llm = ScriptedLLM(first_episode)
+    loop = AgentLoop(env, llm, trace_dir=tmp_path)
+    loop.run(pick_place_task(), seed=0)
+    llm.turns = [[call("pick", **PICK)]]  # second episode: blind pick, same (fixed) layout
+    loop.run(pick_place_task(), seed=1)
+    events = loop.tracer.events
+    assert error_codes(events) == ["UNGROUNDED_ACTION"] and env.execute_calls == 0
+    assert checks(events)[0]["source_seq"] is None
+
+
+def test_place_after_successful_pick_needs_no_reobserve(tmp_path):
+    llm = ScriptedLLM([[call("observe")], [call("pick", **PICK)], [call("place", **PLACE)],
+                       [call("finish", summary="done")]])
+    result, _, events = run(tmp_path, llm=llm)
+    assert result.success and checks(events)[1]["ok"] is True
+
+
+def test_place_chained_after_pick_in_same_turn_is_rejected(tmp_path):
+    llm = ScriptedLLM([[call("observe")], [call("pick", **PICK), call("place", **PLACE)],
+                       [call("place", **PLACE)], [call("finish", summary="done")]])
+    result, env, events = run(tmp_path, llm=llm)
+    assert result.success and error_codes(events) == ["UNGROUNDED_ACTION"]
+    rejected = next(c for c in checks(events) if not c["ok"])
+    assert rejected["name"] == "place" and "holding changed" in rejected["reason"]
+    assert env.execute_calls == 2  # pick + the next-turn place; the chained place never executed
+
+
+def test_blind_place_without_holding_keeps_not_holding_precedence(tmp_path):
+    result, _, events = run(tmp_path, llm=ScriptedLLM([[call("place", **PLACE)]]))
+    assert error_codes(events) == ["NOT_HOLDING"] and checks(events) == []
+
+
+class MovesWhileThinkingLLM(ScriptedLLM):
+    """Moves an object in the env during one LLM step, as a real scene might change while planning."""
+
+    def __init__(self, env, turns, at_turn, oid, x, y):
+        super().__init__(turns)
+        self.env, self.at_turn, self.move, self.n = env, at_turn, (oid, x, y), 0
+
+    def step(self, system, messages, tools):
+        if self.n == self.at_turn:
+            oid, x, y = self.move
+            self.env.poses[oid] = Pose(x=x, y=y)
+        self.n += 1
+        return super().step(system, messages, tools)
+
+
+def test_target_moved_since_delivered_state_is_rejected(tmp_path):
+    env = MockTabletopEnv()
+    moved = dict(object_id="cube_red", x=0.25, y=0.05)
+    llm = MovesWhileThinkingLLM(env, [[call("observe")], [call("pick", **moved)], [call("pick", **moved)],
+                                      [call("place", **PLACE)], [call("finish", summary="done")]],
+                                at_turn=1, oid="cube_red", x=0.25, y=0.05)
+    result, _, events = run(tmp_path, llm=llm, env=env)
+    assert result.success and error_codes(events) == ["UNGROUNDED_ACTION"]
+    assert "moved" in checks(events)[0]["reason"]
+
+
+def test_pick_at_stale_pose_after_move_keeps_object_not_at_pose_precedence(tmp_path):
+    env = MockTabletopEnv()
+    llm = MovesWhileThinkingLLM(env, [[call("observe")], [call("pick", **PICK)]],
+                                at_turn=1, oid="cube_red", x=0.25, y=0.05)
+    _, _, events = run(tmp_path, llm=llm, env=env)
+    assert error_codes(events) == ["OBJECT_NOT_AT_POSE"] and checks(events) == []
+
+
+def test_unrelated_object_moving_does_not_invalidate_pick(tmp_path):
+    env = MockTabletopEnv()
+    llm = MovesWhileThinkingLLM(env, [[call("observe")], [call("pick", **PICK)]],
+                                at_turn=1, oid="plate", x=-0.25, y=0.20)
+    _, _, events = run(tmp_path, llm=llm, env=env)
+    assert error_codes(events) == [] and checks(events)[0]["ok"] is True
+
+
+def test_observe_and_pick_in_same_turn_uses_turn_snapshot(tmp_path):
+    llm = ScriptedLLM([[call("observe"), call("pick", **PICK)], [call("pick", **PICK)],
+                       [call("place", **PLACE)], [call("finish", summary="done")]])
+    result, env, events = run(tmp_path, llm=llm)
+    assert result.success and error_codes(events) == ["UNGROUNDED_ACTION"]
+    first, second = checks(events)[:2]
+    assert first["source_seq"] is None  # same-turn observe result did not ground it
+    assert second["source_seq"] == of(events, "tool_result")[1]["seq"]  # grounded by the rejection state
+
+
+def test_blind_multi_pick_turn_rejects_then_skips(tmp_path):
+    _, env, events = run(tmp_path, llm=ScriptedLLM([[call("pick", **PICK), call("pick", **PICK)]]))
+    assert error_codes(events) == ["UNGROUNDED_ACTION", "SKIPPED"] and env.execute_calls == 0
+
+
+def test_wrong_blind_guess_keeps_object_not_at_pose_then_rejection_grounds(tmp_path):
+    llm = ScriptedLLM([[call("pick", object_id="cube_red", x=0.5, y=0.5)], [call("pick", **PICK)],
+                       [call("place", **PLACE)], [call("finish", summary="done")]])
+    result, _, events = run(tmp_path, llm=llm)
+    assert result.success and error_codes(events) == ["OBJECT_NOT_AT_POSE"]
+
+
+def test_finish_is_not_grounding_gated(tmp_path):
+    _, _, events = run(tmp_path, llm=ScriptedLLM([[call("finish", summary="done")]]))
+    assert error_codes(events) == ["GOAL_NOT_MET"] and checks(events) == []
+
+
+def test_in_loop_grasp_slip_retry_is_unaffected(tmp_path):
+    result, env, events = run(tmp_path, faults=Faults(fail_once={"pick": FailureCode.GRASP_SLIP}))
+    assert result.success and result.retries == 1 and env.execute_calls == 3
+    assert error_codes(events) == [] and all(c["ok"] for c in checks(events))
+    assert len(checks(events)) == 2  # one per tool call, not per retry attempt
+
+
+def test_postcondition_failure_state_grounds_repick(tmp_path):
+    from robot_agent.world import SkillOutcome
+
+    class TransientFalseSuccessEnv(MockTabletopEnv):
+        def __init__(self):
+            super().__init__()
+            self.picks = 0
+
+        def _pick(self, oid, x, y):
+            self.picks += 1
+            return SkillOutcome(ok=True) if self.picks == 1 else super()._pick(oid, x, y)
+
+    llm = ScriptedLLM([[call("observe")], [call("pick", **PICK)], [call("pick", **PICK)],
+                       [call("place", **PLACE)], [call("finish", summary="done")]])
+    result, _, events = run(tmp_path, llm=llm, env=TransientFalseSuccessEnv())
+    assert result.success and error_codes(events) == ["POSTCONDITION_FAILED"]
+
+
+def test_nudge_between_observe_and_pick_keeps_grounding(tmp_path):
+    llm = ScriptedLLM([[call("observe")], [], [call("pick", **PICK)], [call("place", **PLACE)],
+                       [call("finish", summary="done")]])
+    result, _, events = run(tmp_path, llm=llm)
+    assert result.success and len(of(events, "nudge")) == 1 and error_codes(events) == []
+
+
+def test_skipped_result_state_grounds_the_next_turn(tmp_path):
+    llm = ScriptedLLM([[call("observe")],
+                       [call("pick", object_id="cube_red", x=0.5, y=0.5), call("place", **PLACE)],
+                       [call("pick", **PICK)], [call("place", **PLACE)], [call("finish", summary="done")]])
+    result, _, events = run(tmp_path, llm=llm)
+    assert result.success and error_codes(events) == ["OBJECT_NOT_AT_POSE", "SKIPPED"]
+    skipped = next(e for e in of(events, "tool_result") if (e["error"] or {}).get("code") == "SKIPPED")
+    assert skipped["world_state"] is not None
+    repick = checks(events)[0]  # the 0.5,0.5 pick failed validation, so this is the next-turn pick
+    assert repick["ok"] is True
+    assert repick["source_call_id"] == skipped["call_id"] and repick["source_seq"] == skipped["seq"]
+
+
+class MutatesMessagesLLM(ScriptedLLM):
+    """Rewrites the delivered world_state inside the message list during step()."""
+
+    def step(self, system, messages, tools):
+        for m in messages:
+            if m["role"] == "tool":
+                m["content"]["world_state"]["objects"]["cube_red"]["pose"]["x"] = 0.40
+                m["content"]["world_state"]["gripper"]["holding"] = "plate"
+        return super().step(system, messages, tools)
+
+
+def test_message_mutation_during_step_does_not_change_grounding_snapshot(tmp_path):
+    llm = MutatesMessagesLLM([[call("observe")], [call("pick", **PICK)], [call("place", **PLACE)],
+                              [call("finish", summary="done")]])
+    result, _, events = run(tmp_path, llm=llm)
+    assert result.success and error_codes(events) == []
+    pick_chk, place_chk = checks(events)
+    assert pick_chk["ok"] and place_chk["ok"] and pick_chk["source_step"] == 0
+
+
+class KeepsMovingTargetLLM(ScriptedLLM):
+    """Moves cube_red during every step and picks at its new live pose: never grounded."""
+
+    def __init__(self, env):
+        super().__init__([])
+        self.env, self.n = env, 0
+
+    def step(self, system, messages, tools):
+        self.n += 1
+        x = 0.10 + 0.05 * self.n
+        self.env.poses["cube_red"] = Pose(x=x, y=-0.20)
+        return AssistantTurn(tool_calls=[call("pick", object_id="cube_red", x=x, y=-0.20)])
+
+
+def test_repeated_ungrounded_rejections_exhaust_failure_budget(tmp_path):
+    env = MockTabletopEnv()
+    loop = AgentLoop(env, KeepsMovingTargetLLM(env), trace_dir=tmp_path, max_failures=3)
+    result = loop.run(pick_place_task(), seed=0)
+    events = loop.tracer.events
+    assert result.reason == "failure_budget" and result.failures == 3
+    assert error_codes(events) == ["UNGROUNDED_ACTION"] * 3 and env.execute_calls == 0
+
+
+def test_generated_trace_with_ungrounded_rejection_is_not_a_recovery(tmp_path):
+    from robot_agent.memory import MemoryStore
+
+    llm = ScriptedLLM([[call("pick", **PICK)], [call("observe")], [call("pick", **PICK)],
+                       [call("place", **PLACE)], [call("finish", summary="done")]])
+    result, _, events = run(tmp_path, llm=llm)
+    assert result.success and error_codes(events) == ["UNGROUNDED_ACTION"]
+    m = MemoryStore(trace_dirs=[tmp_path], index_path=tmp_path / "idx.json")._parse_trace(Path(result.trace_path))
+    assert "UNGROUNDED_ACTION" in m.failure_codes
+    assert m.recovery_actions == [{"name": "observe"}]  # the rejected pick is never labelled a recovery

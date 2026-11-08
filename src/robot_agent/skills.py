@@ -168,3 +168,40 @@ def verify(name: str, args: _Args, before: WorldState, outcome: SkillOutcome, af
         return outcome.failure
     check = SKILLS[name].postcondition
     return check(before, after, args) if check else None
+
+
+def requires_grounding(name: str) -> bool:
+    """Pose-dependent skills: any skill whose arguments include commanded coordinates."""
+    skill = SKILLS.get(name)
+    return skill is not None and "x" in skill.args.model_fields
+
+
+def grounding_failure(name: str, args: _Args, delivered: WorldState | None, live: WorldState) -> Failure | None:
+    """Check that a pose-dependent call rests on a world state the LLM was actually shown.
+
+    `delivered` is the latest authoritative world_state returned to the LLM in a tool result of the
+    current episode, as it stood when the LLM produced this call; `live` is the env state now.
+    pick: the target object must be in `delivered` and must not have moved since (within GRASP_TOL).
+    place: the gripper's holding state must be the one the LLM was shown. The destination/support
+    pose is not grounded here (out of scope).
+    """
+    if not requires_grounding(name):
+        return None
+    if delivered is None:
+        return Failure(code=FailureCode.UNGROUNDED_ACTION,
+                       detail="no world state has been returned to you in this episode; call observe first")
+    if name == "pick":
+        oid = args.object_id
+        if oid not in delivered.objects:
+            return Failure(code=FailureCode.UNGROUNDED_ACTION,
+                           detail=f"{oid} is not in the last world state returned to you; observe first")
+        seen = delivered.objects[oid].pose
+        moved = live.objects[oid].pose.dist_xy(seen.x, seen.y)
+        if moved > GRASP_TOL:
+            return Failure(code=FailureCode.UNGROUNDED_ACTION,
+                           detail=f"{oid} moved {moved:.3f} m since the last world state returned to you; observe first")
+    if name == "place" and delivered.gripper.holding != live.gripper.holding:
+        return Failure(code=FailureCode.UNGROUNDED_ACTION,
+                       detail=(f"gripper holding changed since the last world state returned to you "
+                               f"({delivered.gripper.holding!r} -> {live.gripper.holding!r}); observe first"))
+    return None

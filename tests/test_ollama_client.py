@@ -60,10 +60,11 @@ def test_step_parses_calls_and_disables_thinking():
 
 def test_full_episode_round_trips_ids_and_handles_bad_json(tmp_path):
     llm = FakeOllama([
-        response(("c1", "observe", "{}")),
-        response(("c2", "pick", '{"object_id": "cube_red", "x": 0.1,')),  # truncated JSON
-        response(("c3", "pick", '{"object_id": "cube_red", "x": 0.1, "y": -0.2}'),
-                 ("c4", "place", '{"x": -0.2, "y": 0.15}')),  # two sequential calls in one turn
+        response(("c1", "observe", "{}"),
+                 ("c2", "pick", '{"object_id": "cube_red", "x": 0.1,')),  # two calls in one turn; truncated JSON
+        # F010: pick and place in separate turns (place needs the post-pick holding state delivered)
+        response(("c3", "pick", '{"object_id": "cube_red", "x": 0.1, "y": -0.2}')),
+        response(("c4", "place", '{"x": -0.2, "y": 0.15}')),
         response(("c5", "finish", '{"summary": "done"}')),
     ])
     result = AgentLoop(MockTabletopEnv(), llm, trace_dir=tmp_path).run(pick_place_task())
@@ -78,13 +79,14 @@ def test_full_episode_round_trips_ids_and_handles_bad_json(tmp_path):
 
 def test_calls_after_a_failure_in_same_turn_are_skipped(tmp_path):
     llm = FakeOllama([
+        response(("c0", "observe", "{}")),  # F010: pose-dependent calls need a delivered world state
         response(("c1", "pick", '{"object_id": "cube_red", "x": 0.1, "y": -0.2}'),
                  ("c2", "place", '{"x": -0.2, "y": 0.15}')),
     ])
     env = MockTabletopEnv(Faults(perturb_at={0: ("cube_red", 0.25, 0.05)}))
     loop = AgentLoop(env, llm, trace_dir=tmp_path)
     loop.run(pick_place_task())
-    codes = [e["error"]["code"] for e in loop.tracer.events if e["event"] == "tool_result"]
+    codes = [e["error"]["code"] for e in loop.tracer.events if e["event"] == "tool_result" and not e["ok"]]
     assert codes == ["OBJECT_NOT_AT_POSE", "SKIPPED"]
     assert env.execute_calls == 1
 

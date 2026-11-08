@@ -56,6 +56,7 @@ class FailureCode(StrEnum):
     POSTCONDITION_FAILED = "POSTCONDITION_FAILED"
     GOAL_NOT_MET = "GOAL_NOT_MET"
     SKIPPED = "SKIPPED"  # not executed: an earlier call in the same turn failed
+    UNGROUNDED_ACTION = "UNGROUNDED_ACTION"  # pose-dependent call not grounded in a delivered current state
 
 
 # Failures that are safe to retry with identical arguments (if preconditions still hold).

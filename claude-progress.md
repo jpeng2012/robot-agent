@@ -1,5 +1,45 @@
 # Robot-Agent Development Progress
 
+## Session 2026-11-07: F010 Observation-grounding contract
+
+### Changes
+- world.py: FailureCode.UNGROUNDED_ACTION.
+- skills.py: requires_grounding() (skills with coordinate args: pick, place) and pure grounding_failure().
+- loop.py: Grounding record (state rebuilt from the delivered world_state, source tool_result seq and call
+  id), reset per episode; snapshot taken once per llm.step turn; check in _handle after validate_call and
+  before dispatch; grounding_check trace event; llm_turn records grounding_source_seq/grounding_step.
+- Tests: 27 new loop tests and 2 skill unit tests; 7 older tests gained an initial observe or a restructured
+  multi-call turn (tests/test_loop.py x5, tests/test_ollama_client.py x2), assertions unchanged.
+
+### Design decisions
+- Grounding comes only from world states the loop returned in tool results (incl. failure, rejection and
+  SKIPPED results). Task text, memory and model output never ground.
+- Per-turn snapshot: every call in a turn is judged on what the LLM had seen before that step.
+- Object-specific freshness: pick needs the target in the delivered state and not moved > GRASP_TOL;
+  place needs the delivered holding state to match live. Destination pose is out of scope.
+- After validate_call (existing codes keep precedence); once per call (GRASP_SLIP retries unchanged).
+- Rejections return fresh state, count toward max_failures; SYSTEM_PROMPT unchanged.
+- Pre-implementation trace scan (151 real Qwen3 episodes): 0 multi-call turns; 21 pick/place calls before any
+  delivered state, all in memory-on runs.
+
+### Verification
+```bash
+pytest tests/ -q -m "not requires_server"   # 128 passed, 5 skipped, 3 deselected
+pytest tests/ -q -rs                        # 131 passed, 5 skipped (Ollama 0.40.2 up)
+# skips: robosuite x4 (ROBOT_AGENT_ROBOSUITE_PYTHON unset), RUN_OLLAMA x1
+```
+- Mutation check: grounding disabled -> all 9 original rejection tests fail.
+- Independent verification review: PASS on all five contract points; commit approved.
+
+### Review findings / remaining
+- B004: UNGROUNDED_ACTION enters F009 memory failure codes and the next success is recorded as a recovery;
+  separate harness/policy validation failures from environment experiences before memory-on evaluations.
+- pick does not compare holding state (contrived same-turn place-then-pick passes); place destination not
+  grounded; future coordinate skills need explicit rules; no max state age for real hardware.
+- Recorded Qwen3 blind picks were at (0.5, 0.5) and still fail OBJECT_NOT_AT_POSE first; F010 fires only on
+  blind-but-correct picks and same-turn chains.
+- Robosuite tests not run.
+
 ## Session 2026-11-07: F009b Stage 2 — recovery-action fix, Ollama reproducibility audit
 
 ### Changes
@@ -37,7 +77,7 @@ pytest tests/ -q -rs
 - BACKLOG — INDEX_VERSION=2 makes the version-1 traces/.memory_index_frozen.json stale: eval scripts that copy it now
   rebuild from live corpus dirs (exclude_patterns ["test_"]) and their frozen-index hash no longer proves a
   frozen corpus. Regenerate the frozen index at version 2 before any further evaluation.
-- Proposed: observation-grounding contract as a future feature (not implemented).
+- Observation-grounding contract: implemented as F010 (see next session entry).
 
 ## Session 2026-11-07: F008 Baseline Qwen3 Replanning Evaluation
 

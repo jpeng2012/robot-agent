@@ -128,6 +128,25 @@
       ],
       "verification": "pytest tests/ -q -rs",
       "notes": "F009a complete. F009b Stage 1 complete (safe memory injection). F009b Stage 2: recovery-action extraction corrected; memory-on/off behavioral comparisons are CONFOUNDED: traces/ollama_repro_audit_v1 shows byte-identical first-turn requests to qwen3:8b on Ollama 0.40.2 yield different first actions depending on preceding-request history (observe cold vs pick after another prompt; mechanism unverified). All pilot/ablation results under traces/ are marked confounded (traces/CONFOUNDED_COMPARISONS.md). 30-pair evaluation NOT run and blocked until each LLM call can be made from a controlled, recorded server history. Known limitations: only the first success after a failure is recorded (observe can occupy the slot); AgentLoop re-saves the index on every memory-on run; 'N days ago' makes memory prompts time-dependent. Proposed next feature: observation-grounding contract (reject physical skills not grounded in a fresh tool observation). BACKLOG: parser/loop inconsistency - an env SkillOutcome(ok=False, failure=None) is a success to the loop (verify returns None) but a failure to the memory parser, which can create a spurious pending failure and recovery label; not fixed (no runtime change). BACKLOG: regenerate traces/.memory_index_frozen.json at INDEX_VERSION 2 before any further evaluation."
+    },
+    {
+      "id": "F010",
+      "title": "Observation-grounding contract for pose-dependent actions",
+      "status": "complete",
+      "acceptance": [
+        "pick/place (any skill with coordinate args) execute only if grounded in a world_state the loop returned to the LLM in a tool result of the current episode; otherwise FailureCode.UNGROUNDED_ACTION before any env execution",
+        "Grounding snapshot captured once per llm.step turn; results produced during a turn ground only later turns (observe+pick and pick+place in one turn are rejected)",
+        "Grounding records rebuilt from the delivered world_state, reset per episode; task text, memory text and model output never ground (memory with coordinates in its text still rejected)",
+        "pick: target object present in the delivered state and not moved beyond GRASP_TOL since; unrelated objects moving do not invalidate",
+        "place: delivered gripper holding state equals live holding state (destination/support pose not grounded)",
+        "Check runs after validate_call (existing codes keep precedence) and once per tool call (GRASP_SLIP retries unchanged)",
+        "Rejections return fresh world_state, count toward max_failures, and are logged as grounding_check + validation_error; grounding_check records source_seq, source_call_id, source_step, live_step; llm_turn records grounding_source_seq/grounding_step",
+        "Tests: 27 new loop tests + 2 unit tests (blind-correct pick, multi-call turns, reset isolation, failure/SKIPPED state grounding, holding transitions, target moved while planning, message mutation during step, failure budget, memory parse of UNGROUNDED trace); 7 older tests gained an initial observe or a restructured turn, assertions unchanged",
+        "Mutation check: with grounding disabled, all 9 original rejection tests fail",
+        "Non-server suite 128 passed, 5 skipped, 3 deselected; full suite with local Ollama 131 passed, 5 skipped"
+      ],
+      "verification": "pytest tests/ -q -rs",
+      "notes": "Interfaces unchanged (LLMClient, RobotEnv, SYSTEM_PROMPT, memory retrieval, model settings). Limitations: place destination/support pose is not grounded; pick does not compare holding state, so a contrived same-turn place-then-pick at the carry position passes; requires_grounding keys on an 'x' arg, so future coordinate skills need explicit freshness rules; Grounding.state is a mutable pydantic model that no code mutates; no max state age (needed for real hardware); robosuite tests not run (ROBOT_AGENT_ROBOSUITE_PYTHON unset); once a state is delivered, a guess within GRASP_TOL is indistinguishable from reading it. UNGROUNDED_ACTION enters F009 memory failure codes (see B004)."
     }
   ],
   "backlog": [
@@ -166,11 +185,25 @@
       "verification": "pytest tests/test_robosuite_env.py::test_direct_pick_then_place_meets_goal -v -s",
       "blockers": "Requires Robosuite installation and ROBOT_AGENT_ROBOSUITE_PYTHON environment",
       "notes": "Uses raw observations from independently successful Robosuite grasps (fsm_lifted + grasped + lifted) to validate F007 thresholds don't cause false rejections. Measurements taken from out.info containing eef_pose_world and cube_pose_world."
+    },
+    {
+      "id": "B004",
+      "title": "Distinguish harness/policy validation failures from environment recovery experiences in episodic memory",
+      "status": "open",
+      "acceptance": [
+        "Memory summaries do not present loop-policy rejections (e.g. UNGROUNDED_ACTION, and decide for INVALID_ARGS/SKIPPED) as environment failures or their following call as an environment recovery",
+        "Decision recorded on which failure codes count as environment experiences vs harness/policy validation",
+        "Deterministic tests on generated traces containing UNGROUNDED_ACTION",
+        "Resolved before any future memory-on evaluation"
+      ],
+      "verification": "pytest tests/test_memory.py -q",
+      "blockers": "Needs a design decision; memory parser change deferred (not part of F010)",
+      "notes": "F010 logs UNGROUNDED_ACTION as validation_error, so the F009 parser adds it to failure_codes and records the next independently successful call (usually observe) as a recovery action."
     }
   ],
   "meta": {
     "last_updated": "2026-11-07",
     "baseline_commit": "45cd36b",
-    "baseline_test_status": "79 passed, 5 skipped (was 45 before F009, +26 from test_memory.py, +6 from test_loop.py, +2 from format_memory fixes)"
+    "baseline_test_status": "131 passed, 5 skipped (full suite with local Ollama, F010); non-server 128 passed, 5 skipped, 3 deselected"
   }
 }
