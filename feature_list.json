@@ -120,10 +120,14 @@
         "F009b Stage 1: Memory framed as 'historical data, not current state' with explicit boundary",
         "F009b Stage 1: RecordingLLM verifies SYSTEM_PROMPT unchanged, no sensitive data leaked",
         "F009b Stage 1: Graceful degradation on missing directories or errors",
-        "All 79 tests pass (73 existing + 6 new), no regressions"
+        "F009b Stage 2 fix (0f73e9f): recovery_actions record only calls whose own outcome succeeded (validation_error/env_outcome/verify/tool_result per call_id); episode success never used",
+        "Corpus check: hardened parser gives identical recovery_actions and failure_codes on all 77 frozen-corpus episodes",
+        "F009b Stage 2 hardening: INDEX_VERSION=2 forces reparse of older indexes; duplicate call IDs never labelled recoveries; non-dict args tolerated; end-to-end AgentLoop->trace->parser test",
+        "Success eligibility requires episode_end success/goal_met AND a passing FINAL goal_check (early failed finish then verified completion is eligible; an earlier passing check cannot rescue a failed final one); corpus unchanged (77/77)",
+        "Full suite: 104 passed, 5 skipped (robosuite x4, RUN_OLLAMA x1); 3 live Qwen3 tests in test_loop.py run against a local Ollama when it is up (requires_server mark is not registered)"
       ],
-      "verification": "pytest tests/test_memory.py tests/test_loop.py -v",
-      "notes": "F009a complete: Coordinate-free episodic memory storage from JSONL traces. F009b Stage 1 complete: Safe memory injection into AgentLoop. DEFERRED to Stage 2: 30-run Qwen3 paired evaluation (memory-on vs memory-off), statistical analysis, test_memory_integration.py. Limitations: Memory index is file-based (mtime tracking, force_reindex for manual cleanup), default trace directories (qwen/, qwen2/, baseline/) are configurable, episode ID collision risk for same filenames in different directories."
+      "verification": "pytest tests/ -q -rs",
+      "notes": "F009a complete. F009b Stage 1 complete (safe memory injection). F009b Stage 2: recovery-action extraction corrected; memory-on/off behavioral comparisons are CONFOUNDED: traces/ollama_repro_audit_v1 shows byte-identical first-turn requests to qwen3:8b on Ollama 0.40.2 yield different first actions depending on preceding-request history (observe cold vs pick after another prompt; mechanism unverified). All pilot/ablation results under traces/ are marked confounded (traces/CONFOUNDED_COMPARISONS.md). 30-pair evaluation NOT run and blocked until each LLM call can be made from a controlled, recorded server history. Known limitations: only the first success after a failure is recorded (observe can occupy the slot); AgentLoop re-saves the index on every memory-on run; 'N days ago' makes memory prompts time-dependent. Proposed next feature: observation-grounding contract (reject physical skills not grounded in a fresh tool observation). BACKLOG: parser/loop inconsistency - an env SkillOutcome(ok=False, failure=None) is a success to the loop (verify returns None) but a failure to the memory parser, which can create a spurious pending failure and recovery label; not fixed (no runtime change). BACKLOG: regenerate traces/.memory_index_frozen.json at INDEX_VERSION 2 before any further evaluation."
     }
   ],
   "backlog": [

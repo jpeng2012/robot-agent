@@ -1,5 +1,44 @@
 # Robot-Agent Development Progress
 
+## Session 2026-11-07: F009b Stage 2 — recovery-action fix, Ollama reproducibility audit
+
+### Changes
+- 0f73e9f: recovery_actions now list only calls whose own outcome succeeded, derived per call_id from
+  validation_error, env_outcome, verify and tool_result. Episode success is never used. Tests for rejected
+  placement after a failed pick, mixed sequences, tool_result-only success, retries, skipped calls, missing ids.
+- Hardening commit: INDEX_VERSION=2 (older indexes rebuilt even with unchanged mtimes), duplicate call IDs
+  treated as ambiguous, non-dict args tolerated, end-to-end AgentLoop trace test, failed-finish tests.
+  Success eligibility now requires episode_end success/goal_met and a passing FINAL goal_check (was: first
+  goal_check). Corpus eligibility unchanged (77/77 indexed, identical contents).
+- Evaluation-only scripts (untracked): pilot_memory_eval.py, ablation_first_action.py,
+  ablation_recovery_variants.py, ollama_repro_audit.py; scratch: compare_memory_fix.py, inspect_memory.py.
+
+### Findings
+- Old parser recorded rejected place() calls as recoveries; corrected memory removed NOT_HOLDING attempts.
+- Memory-on runs then opened with an ungrounded pick(cube_red, 0.5, 0.5), always rejected by validation.
+- Reproducibility audit (traces/ollama_repro_audit_v1): identical request bytes give observe (cold, repeat,
+  turn-1 prime) or pick (after the B5 prompt); tool-name logprob gap +6.09 nats cold vs -0.09 after B5.
+  Explicit seed has no effect. Mechanism unverified.
+- All earlier memory-on/off comparisons are confounded by server cache history (traces/CONFOUNDED_COMPARISONS.md).
+
+### Verification
+```bash
+pytest tests/ -q -rs
+# Result: 104 passed, 5 skipped (robosuite x4, RUN_OLLAMA x1). The 3 requires_server Qwen3 tests in
+# test_loop.py ran against the local Ollama (mark not registered, so they do not skip without a server).
+```
+
+### Remaining
+- F009 behavioral evaluation remains partial/confounded. 30-pair memory-on/off evaluation not run; needs controlled server history per LLM call.
+- Only the first success after a failure is recorded; observe can occupy the slot.
+- BACKLOG — parser/loop divergence (present since 0f73e9f, not a regression, not fixed): an env SkillOutcome(ok=False,
+  failure=None) is a success to the loop (verify returns None) but a failure to the parser, which can create
+  a spurious pending failure. Mock backends are not known to emit it.
+- BACKLOG — INDEX_VERSION=2 makes the version-1 traces/.memory_index_frozen.json stale: eval scripts that copy it now
+  rebuild from live corpus dirs (exclude_patterns ["test_"]) and their frozen-index hash no longer proves a
+  frozen corpus. Regenerate the frozen index at version 2 before any further evaluation.
+- Proposed: observation-grounding contract as a future feature (not implemented).
+
 ## Session 2026-11-07: F008 Baseline Qwen3 Replanning Evaluation
 
 ### Changes

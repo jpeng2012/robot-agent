@@ -10,9 +10,18 @@ from __future__ import annotations
 
 import json
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+# Bump whenever extraction semantics change. Indexes saved with any other version are
+# discarded on load and every trace is reparsed, even if its mtime is unchanged.
+#   1: original recovery parser (recorded the next call after a failure, whatever its outcome),
+#      and commit 0f73e9f (own-outcome check) which did not bump the version
+#   2: own-outcome check + duplicate call IDs treated as ambiguous + non-dict args tolerated,
+#      and success eligibility requires the final goal_check to agree with episode_end
+INDEX_VERSION = 2
 
 
 @dataclass
@@ -239,69 +248,64 @@ class MemoryStore:
                     if text and text not in llm_reasoning:
                         llm_reasoning.append(text)
 
-            # Collect recovery actions (only successful actions after failures)
-            # Build call_id -> success mapping
-            call_outcomes = {}  # call_id -> bool (True if successful)
+            # Collect recovery actions.
+            #
+            # A recovery action is the first tool call after a failed call whose OWN outcome was
+            # successful. Episode success is never used. Each call's outcome comes from its own
+            # events, keyed by call_id: validation_error (rejected), env_outcome (last attempt
+            # wins, so loop-internal retries resolve to the final attempt), verify (only
+            # overrides a successful env_outcome), and tool_result as the fallback for calls
+            # without execution events (observe, finish, skipped calls).
+            #
+            # Limitations (intended): only the first success after a failure is recorded, so
+            # observe() can occupy the slot and a later corrective pick is not recorded. A
+            # call_id that appears on more than one tool_call is ambiguous: its events cannot be
+            # attributed to one call, so it is never recorded and it clears a pending failure
+            # without recording anything (it may itself have been the recovery). Calls with no
+            # call_id or no outcome events are ignored.
+            tool_call_ids = Counter(
+                e.get("call_id") for e in events if e["event"] == "tool_call" and e.get("call_id")
+            )
+            ambiguous_ids = {cid for cid, n in tool_call_ids.items() if n > 1}
+
+            call_outcomes: dict[str, bool] = {}  # call_id -> own outcome succeeded
             for event in events:
                 call_id = event.get("call_id")
                 if not call_id:
                     continue
-
                 if event["event"] == "validation_error":
-                    # Precondition failure - action rejected before execution
                     call_outcomes[call_id] = False
                 elif event["event"] == "env_outcome":
-                    # Environment execution result
-                    outcome = event.get("outcome", {})
-                    call_outcomes[call_id] = outcome.get("ok", False)
+                    outcome = event.get("outcome")
+                    call_outcomes[call_id] = bool(isinstance(outcome, dict) and outcome.get("ok"))
                 elif event["event"] == "verify":
-                    # Postcondition check result
-                    # Only override if env_outcome was successful
                     if call_outcomes.get(call_id, True):
-                        call_outcomes[call_id] = event.get("ok", False)
+                        call_outcomes[call_id] = bool(event.get("ok"))
                 elif event["event"] == "tool_result":
-                    # Final result (for actions without env_outcome like observe)
-                    # Only set if not already determined by env_outcome/verify/validation_error
                     if call_id not in call_outcomes:
-                        call_outcomes[call_id] = event.get("ok", False)
+                        call_outcomes[call_id] = bool(event.get("ok"))
 
-            # Track failures and find successful recoveries
             recovery_actions = []
-            failure_call_ids = set()
-
+            pending_failure = False
             for event in events:
-                call_id = event.get("call_id")
-                if not call_id:
+                if event["event"] != "tool_call":
                     continue
-
-                # Mark failed actions
-                if call_id in call_outcomes and not call_outcomes[call_id]:
-                    failure_call_ids.add(call_id)
-
-            # Find tool calls that occurred after failures and succeeded
-            prev_failed = False
-            for event in events:
                 call_id = event.get("call_id")
-
-                # Check if we just encountered a failure
-                if call_id and call_id in failure_call_ids:
-                    prev_failed = True
-
-                # If this is a tool call after failure, check if it succeeded
-                if event["event"] == "tool_call" and prev_failed:
-                    call_id = event.get("call_id")
-
-                    # Only record if this action succeeded
-                    if call_id and call_outcomes.get(call_id, False):
-                        # Coordinate-free: only store action name and object_id
-                        tool_call = {"name": event.get("name")}
-
-                        # Preserve object_id if present (safe, no coordinates)
-                        if "object_id" in event.get("args", {}):
-                            tool_call["object_id"] = event["args"]["object_id"]
-
-                        recovery_actions.append(tool_call)
-                        prev_failed = False  # Reset after successful recovery
+                if not call_id or call_id not in call_outcomes:
+                    continue  # unverifiable call: does not change state
+                if call_id in ambiguous_ids:
+                    pending_failure = False  # cannot tell whether this was the recovery
+                    continue
+                if not call_outcomes[call_id]:
+                    pending_failure = True
+                elif pending_failure:
+                    # Coordinate-free: only the action name and a string object_id
+                    tool_call = {"name": event.get("name")}
+                    args = event.get("args")
+                    if isinstance(args, dict) and isinstance(args.get("object_id"), str):
+                        tool_call["object_id"] = args["object_id"]
+                    recovery_actions.append(tool_call)
+                    pending_failure = False
 
             # Build provenance
             provenance = {
@@ -344,24 +348,30 @@ class MemoryStore:
         if any(pattern in memory.episode_id for pattern in self.exclude_patterns):
             return False
 
-        # For successful episodes, verify goal was actually achieved
-        # This requires checking the goal_check event in the original trace
+        # For successful episodes, the terminal episode_end and the FINAL goal verification must
+        # agree: episode_end reports success with reason goal_met, and the last goal_check logged
+        # before it passed. An earlier passing goal_check followed by a failing one is rejected; an
+        # earlier failed finish followed by a verified completion is accepted.
         if memory.success:
             try:
                 with open(memory.trace_path, "r") as f:
                     events = [json.loads(line) for line in f if line.strip()]
 
-                # Find goal_check event
-                goal_check = next(
-                    (e for e in events if e["event"] == "goal_check"),
-                    None
+                end_idx = max(
+                    (i for i, e in enumerate(events) if e.get("event") == "episode_end"),
+                    default=None,
                 )
-
-                # If no goal_check or goal not passed, exclude
-                if not goal_check or not goal_check.get("passed", False):
+                if end_idx is None:
+                    return False
+                result = events[end_idx].get("result") or {}
+                if result.get("success") is not True or result.get("reason") != "goal_met":
                     return False
 
-            except (FileNotFoundError, json.JSONDecodeError, KeyError):
+                checks = [e for e in events[:end_idx] if e.get("event") == "goal_check"]
+                if not checks or checks[-1].get("passed") is not True:
+                    return False
+
+            except (FileNotFoundError, json.JSONDecodeError, KeyError, AttributeError, TypeError):
                 # Can't verify, exclude for safety
                 return False
 
@@ -370,7 +380,7 @@ class MemoryStore:
     def _save_index(self) -> None:
         """Persist index to disk."""
         index_data = {
-            "version": 1,
+            "version": INDEX_VERSION,
             "indexed_at": time.time(),
             "memories": [m.to_dict() for m in self.memories],
             "file_mtimes": self._file_mtimes,
@@ -384,6 +394,12 @@ class MemoryStore:
         try:
             with self.index_path.open("r") as f:
                 index_data = json.load(f)
+
+            if index_data.get("version") != INDEX_VERSION:
+                # Built by a different extraction version: discard so every trace is reparsed
+                self.memories = []
+                self._file_mtimes = {}
+                return
 
             self.memories = [
                 EpisodeMemory.from_dict(m) for m in index_data.get("memories", [])

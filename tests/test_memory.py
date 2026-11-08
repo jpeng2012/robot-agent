@@ -1367,3 +1367,201 @@ def test_failures_followed_only_by_failures_record_nothing(temp_traces):
     ], success=False)
     assert m.recovery_actions == []
     assert {"POSTCONDITION_FAILED", "NOT_HOLDING"} <= set(m.failure_codes)
+
+
+# --- Hardening: index migration, duplicate call IDs, malformed args, failed finish, end-to-end ---
+
+from robot_agent.memory import INDEX_VERSION  # noqa: E402
+
+
+def _slip_then_pick(prefix="c"):
+    return [
+        _call(f"{prefix}1", "pick", object_id="cube_red", x=0.1, y=-0.2),
+        *_skill(f"{prefix}1", False, code="GRASP_SLIP"), _result(f"{prefix}1", False, "GRASP_SLIP"),
+        _call(f"{prefix}2", "place", x=-0.2, y=0.15),
+        {"event": "validation_error", "call_id": f"{prefix}2", "failure": {"code": "NOT_HOLDING", "detail": "x"}},
+        _result(f"{prefix}2", False, "NOT_HOLDING"),
+        _call(f"{prefix}3", "pick", object_id="cube_red", x=0.2, y=-0.2),
+        *_skill(f"{prefix}3", True), _result(f"{prefix}3", True),
+    ]
+
+
+def test_index_from_previous_parser_version_is_rebuilt_even_if_mtimes_match(temp_traces):
+    m = _write_episode(temp_traces, "migrate", _slip_then_pick())
+    trace = temp_traces / "migrate.jsonl"
+    idx = temp_traces / ".idx.json"
+    # Simulate an index written by the version-1 parser: stale recovery list, matching mtime.
+    stale = m.to_dict()
+    stale["recovery_actions"] = [{"name": "place"}, {"name": "pick", "object_id": "cube_red"}]
+    idx.write_text(json.dumps({"version": 1, "indexed_at": 0.0, "memories": [stale],
+                               "file_mtimes": {str(trace): trace.stat().st_mtime}}))
+
+    store = MemoryStore(trace_dirs=[temp_traces], index_path=idx)
+    assert store.index_episodes() == 1  # reparsed despite unchanged mtime
+    assert store.memories[0].recovery_actions == [{"name": "pick", "object_id": "cube_red"}]
+    assert json.loads(idx.read_text())["version"] == INDEX_VERSION
+
+    # A current-version index is reused without reparsing.
+    again = MemoryStore(trace_dirs=[temp_traces], index_path=idx)
+    assert again.index_episodes() == 0
+    assert again.memories[0].recovery_actions == [{"name": "pick", "object_id": "cube_red"}]
+
+
+def test_index_without_version_field_is_rebuilt(temp_traces):
+    _write_episode(temp_traces, "nover", _slip_then_pick())
+    trace = temp_traces / "nover.jsonl"
+    idx = temp_traces / ".idx.json"
+    idx.write_text(json.dumps({"memories": [], "file_mtimes": {str(trace): trace.stat().st_mtime}}))
+    store = MemoryStore(trace_dirs=[temp_traces], index_path=idx)
+    assert store.index_episodes() == 1
+
+
+def test_duplicate_call_id_is_never_labelled_a_recovery(temp_traces):
+    """Failed and successful picks share id "x": their events cannot be told apart."""
+    m = _write_episode(temp_traces, "dup", [
+        _call("a", "pick", object_id="cube_red", x=0.1, y=-0.2),
+        *_skill("a", False, code="GRASP_SLIP"), _result("a", False, "GRASP_SLIP"),
+        _call("x", "pick", object_id="cube_red", x=0.3, y=-0.2),
+        *_skill("x", False, code="GRASP_SLIP"), _result("x", False, "GRASP_SLIP"),
+        _call("x", "pick", object_id="cube_red", x=0.2, y=-0.2),
+        *_skill("x", True), _result("x", True),
+    ])
+    assert m.recovery_actions == []
+    assert "GRASP_SLIP" in m.failure_codes
+
+
+def test_duplicate_call_id_does_not_block_later_verified_recovery(temp_traces):
+    m = _write_episode(temp_traces, "dup_then", [
+        _call("x", "observe"), _result("x", True),
+        _call("x", "observe"), _result("x", True),
+        _call("b", "pick", object_id="cube_red", x=0.5, y=0.5),
+        {"event": "validation_error", "call_id": "b", "failure": {"code": "OBJECT_NOT_AT_POSE", "detail": "x"}},
+        _result("b", False, "OBJECT_NOT_AT_POSE"),
+        _call("c", "pick", object_id="cube_red", x=0.1, y=-0.2), *_skill("c", True), _result("c", True),
+    ])
+    assert m.recovery_actions == [{"name": "pick", "object_id": "cube_red"}]
+
+
+@pytest.mark.parametrize("args", ['{"object_id": "cube_red", x', None, ["object_id"], {"object_id": 7}])
+def test_non_dict_or_malformed_args_do_not_raise(temp_traces, args):
+    m = _write_episode(temp_traces, "badargs", [
+        _call("c1", "pick", object_id="cube_red", x=0.1, y=-0.2),
+        *_skill("c1", False, code="GRASP_SLIP"), _result("c1", False, "GRASP_SLIP"),
+        {"event": "tool_call", "call_id": "c2", "name": "pick", "args": args},
+        *_skill("c2", True), _result("c2", True),
+    ])
+    assert m.recovery_actions == [{"name": "pick"}]  # recorded without an object_id
+
+
+def test_failed_finish_is_a_failure_and_a_later_success_is_the_recovery(temp_traces):
+    # Extraction only (parsed directly). Eligibility of this trace shape is covered by
+    # test_early_failed_finish_then_verified_completion_is_eligible.
+    events = [
+        {"event": "episode_start", "ts": 1.0, "task": {"name": "pick_place"}, "llm": "OllamaLLMClient"},
+        _call("c1", "finish", summary="done"),
+        {"event": "goal_check", "call_id": "c1", "passed": False, "unmet": ["On(cube_red, plate)"]},
+        _result("c1", False, "GOAL_NOT_MET"),
+        _call("c2", "pick", object_id="cube_red", x=0.1, y=-0.2), *_skill("c2", True), _result("c2", True),
+        _call("c3", "place", x=-0.2, y=0.15), *_skill("c3", True), _result("c3", True),
+        _call("c4", "finish", summary="done"),
+        {"event": "goal_check", "call_id": "c4", "passed": True, "unmet": []},
+        _result("c4", True),
+        {"event": "episode_end", "result": {"success": True, "reason": "goal_met"}},
+    ]
+    trace = temp_traces / "finish_fail.jsonl"
+    trace.write_text("\n".join(json.dumps(e) for e in events) + "\n")
+    m = MemoryStore(trace_dirs=[temp_traces], index_path=temp_traces / ".idx.json")._parse_trace(trace)
+    assert m.recovery_actions == [{"name": "pick", "object_id": "cube_red"}]
+
+
+def test_successful_finish_right_after_failure_is_recorded_as_finish(temp_traces):
+    """Documents existing semantics: any first independently successful call fills the slot."""
+    m = _write_episode(temp_traces, "finish_ok", [
+        _call("c1", "observe"), _result("c1", True),
+        _call("c2", "place", x=-0.2, y=0.15),
+        {"event": "validation_error", "call_id": "c2", "failure": {"code": "NOT_HOLDING", "detail": "x"}},
+        _result("c2", False, "NOT_HOLDING"),
+        _call("c3", "finish", summary="done"),
+        {"event": "goal_check", "call_id": "c3", "passed": True, "unmet": []},
+        _result("c3", True),
+    ])
+    assert m.recovery_actions == [{"name": "finish"}]
+
+
+def test_end_to_end_agent_loop_trace_records_only_verified_recovery(tmp_path):
+    """Real AgentLoop + MockTabletopEnv: rejected pick, rejected place, then a verified pick."""
+    from robot_agent.env import MockTabletopEnv
+    from robot_agent.goals import pick_place_task
+    from robot_agent.llm import ScriptedLLM, ToolCall
+    from robot_agent.loop import AgentLoop
+
+    def tc(i, name, **args):
+        return [ToolCall(id=f"call_{i}", name=name, args=args)]
+
+    llm = ScriptedLLM([
+        tc(0, "pick", object_id="cube_red", x=0.5, y=0.5),      # wrong pose -> validation_error
+        tc(1, "place", x=-0.2, y=0.15),                         # empty gripper -> NOT_HOLDING
+        tc(2, "observe"),
+        tc(3, "pick", object_id="cube_red", x=0.1, y=-0.2),
+        tc(4, "place", x=-0.2, y=0.15),
+        tc(5, "finish", summary="done"),
+    ])
+    result = AgentLoop(MockTabletopEnv(), llm, trace_dir=tmp_path / "e2e").run(pick_place_task(), seed=0)
+    assert result.success
+
+    store = MemoryStore(trace_dirs=[tmp_path / "e2e"], index_path=tmp_path / "idx.json")
+    # ScriptedLLM episodes are ineligible for the index by design, so parse the trace directly.
+    m = store._parse_trace(Path(result.trace_path))
+    assert m is not None
+    assert m.recovery_actions == [{"name": "observe"}]  # first independently successful call
+    assert {"OBJECT_NOT_AT_POSE", "NOT_HOLDING"} <= set(m.failure_codes)
+    text = store.format_memory(m)
+    assert "place()" not in text and "0.5" not in text and "0.1" not in text
+
+
+# --- Success eligibility: terminal episode_end must agree with the FINAL goal_check ---
+
+def _index_events(trace_dir, name, body):
+    events = [{"event": "episode_start", "ts": 1.0, "task": {"name": "pick_place"},
+               "llm": "OllamaLLMClient", "model": "qwen3"}] + body
+    (trace_dir / f"{name}.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
+    store = MemoryStore(trace_dirs=[trace_dir], index_path=trace_dir / ".idx.json")
+    store.index_episodes()
+    return [m.episode_id for m in store.memories]
+
+
+def _finish(cid, passed):
+    return [_call(cid, "finish", summary="done"),
+            {"event": "goal_check", "call_id": cid, "passed": passed,
+             "unmet": [] if passed else ["On(cube_red, plate)"]},
+            _result(cid, passed, None if passed else "GOAL_NOT_MET")]
+
+
+def test_early_failed_finish_then_verified_completion_is_eligible(temp_traces):
+    ids = _index_events(temp_traces, "late_success", [
+        *_finish("c1", False),
+        _call("c2", "pick", object_id="cube_red", x=0.1, y=-0.2), *_skill("c2", True), _result("c2", True),
+        _call("c3", "place", x=-0.2, y=0.15), *_skill("c3", True), _result("c3", True),
+        *_finish("c4", True),
+        {"event": "episode_end", "result": {"success": True, "reason": "goal_met"}},
+    ])
+    assert ids == ["late_success"]
+
+
+def test_earlier_passing_goal_check_does_not_rescue_a_failed_final_check(temp_traces):
+    ids = _index_events(temp_traces, "late_fail", [
+        *_finish("c1", True),
+        *_finish("c2", False),
+        {"event": "episode_end", "result": {"success": True, "reason": "goal_met"}},  # inconsistent
+    ])
+    assert ids == []
+
+
+@pytest.mark.parametrize("result", [
+    {"success": True, "reason": "max_steps"},
+    {"success": True},
+    {"success": "true", "reason": "goal_met"},
+])
+def test_success_requires_episode_end_goal_met(temp_traces, result):
+    ids = _index_events(temp_traces, "bad_end", [*_finish("c1", True), {"event": "episode_end", "result": result}])
+    assert ids == []
