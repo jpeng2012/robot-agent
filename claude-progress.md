@@ -1,5 +1,58 @@
 # Robot-Agent Development Progress
 
+## Session 2026-11-08: Milestone 1 Phase B2 — robosuite rejection and recovery paths through AgentLoop
+
+### Changes (tests/test_robosuite_env.py only; no production change)
+- Test-local fixtures: CountingEnv (records RobotEnv.execute() calls, attributed at call time to the tool
+  call being handled), HybridLLM (scripted failure prefix, then PickPlacePolicyLLM reading only the
+  message list), failure_layer (classifies each failed call by event chain, since codes are shared
+  between harness and worker), assert_rejected_without_motion, assert_recovery_grounded.
+- Counters kept distinct: RobotEnv.execute() calls (client side), backend WorldState.step (incremented
+  by the worker even when it rejects), simulator control_steps (env_outcome.info, absent on rejection).
+
+### Coverage, by layer
+- Harness rejection, no execute() call: T1 blind correct pick -> UNGROUNDED_ACTION; T2 pick 0.08 m off
+  after observe -> OBJECT_NOT_AT_POSE (validate_call, no grounding_check); T3 premature finish ->
+  GOAL_NOT_MET; T6 place chained after a physical pick in one turn -> UNGROUNDED_ACTION ("holding changed").
+- Worker rejection before motion: T4 place at (0.30, 0.30) inside the ±0.5 schema bounds but outside
+  robot reach (seed 0) and on the barrier at (0.0, 0.14) (seed 7) -> OUT_OF_WORKSPACE; T5 pick("target")
+  -> UNKNOWN_OBJECT with the worker's "not graspable" detail. Shown by one execute() call, step +1,
+  info == {}, and unchanged sim time, object and gripper poses and holding; the grasp survives a rejected
+  place; no retry.
+- Physical failure after motion: NOT tested (see B005).
+- Every test recovers to goal_met; each recovery pick/place is grounded by the tool_result delivered
+  just before its turn (source_seq, source_call_id, source_step) and its arguments equal that state.
+- T7: reset after an episode ending while holding restores the seed-0 initial state.
+
+### Verification
+```bash
+ROBOT_AGENT_ROBOSUITE_PYTHON=~/miniconda3/envs/robot_policy/bin/python pytest tests/test_robosuite_env.py -v
+# 22 passed (two full runs 50.7 s / 49.9 s, post-review run 49.8 s); T4 alone 2 passed, T5 alone 1 passed
+pytest tests/ -q -m "not requires_server"   # 128 passed, 17 skipped, 3 deselected
+```
+- Per test ~4.3-4.9 s (T7 ~1.7 s).
+- Mutations (all fail exactly the targeted tests):
+  - classifier treats worker rejections as physical -> T4 x2, T5 fail;
+  - loop grounding check disabled -> T1, T6 fail;
+  - worker steps the sim 3 times before rejecting (worker restored, sha256 a6f2a01f...) -> T4 x2, T5
+    fail on sim time (6.9 -> 7.2 s, 7.0 -> 7.3 s, 0.0 -> 0.3 s).
+- Evidence (gitignored): traces/robosuite_phaseB2_v1/ (run1, run2, run3_after_review, t4_alone,
+  t5_alone, mutation_layer, mutation_grounding, mutation_settle_before_reject, nonserver).
+
+### Independent review findings
+- Verdict commit. Applied: exact object-state comparison, worker-detail assertion in T5, corrected
+  HybridLLM docstring.
+- Limitations:
+  - Place-argument checks cannot detect hard-coding, since the target pose is a layout constant; a
+    hard-coded seed-0 pick fails only by a ~1.6e-19 settle residue.
+  - Execute attribution reads the loop's own tool_call events.
+  - No mutation guards the provenance fields, attribution, argument equality or T7 reset equivalence.
+  - Only the default test order was run; T7 compares realized init, holding, step and t, not the full
+    sim/controller state.
+  - The robosuite module now takes ~50 s (was ~16 s).
+- Uncovered on robosuite: B005 (physical failures after motion, retries, F010 "moved", loop terminations,
+  worker-only branches, displaced-cube recovery).
+
 ## Session 2026-11-07: Milestone 1 Phases A and B1 — robosuite baseline and seeded resets
 
 ### Phase A (no code changes)

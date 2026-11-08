@@ -43,16 +43,17 @@
       "title": "Robosuite physics backend via subprocess bridge",
       "status": "complete",
       "acceptance": [
-        "test_robosuite_env.py: 14 tests (6 always-run goal-predicate tests + 8 @sim tests); all 14 pass with ROBOT_AGENT_ROBOSUITE_PYTHON=~/miniconda3/envs/robot_policy/bin/python (Python 3.10.20, robosuite 1.5.2, mujoco 3.3.5, numpy 1.26.4); @sim tests skip when the variable is unset",
+        "test_robosuite_env.py: 22 tests (6 always-run goal-predicate tests + 16 @sim tests); all 22 pass with ROBOT_AGENT_ROBOSUITE_PYTHON=~/miniconda3/envs/robot_policy/bin/python (Python 3.10.20, robosuite 1.5.2, mujoco 3.3.5, numpy 1.26.4); @sim tests skip when the variable is unset",
         "Python 3.10 worker isolation",
         "Coordinate frame alignment (z=0 at rest)",
         "CompositeController at 10 Hz (arm controller type itself not asserted)",
         "Region-based goal checking",
         "Seeded resets: robosuite env.rng and the placement sampler get fresh generators on every reset (SeedSequence(seed).spawn(2) when seeded, unseeded default_rng() otherwise); same seed reproduces the observed initial state across fresh worker processes",
-        "backend_info records realized initial conditions (seed, installed RNG source/entropy, robot_init_qpos, cube size, z_ref, settled cube/eef poses) and python/robosuite/mujoco/numpy versions with sha256 of the worker, env and expert sources"
+        "backend_info records realized initial conditions (seed, installed RNG source/entropy, robot_init_qpos, cube size, z_ref, settled cube/eef poses) and python/robosuite/mujoco/numpy versions with sha256 of the worker, env and expert sources",
+        "Phase B2 deterministic failure paths through AgentLoop on robosuite (seeds 0 and 7), each followed by recovery to goal_met with grounding provenance asserted for every recovery pick/place: harness rejections with no RobotEnv.execute() call (UNGROUNDED_ACTION blind pick, OBJECT_NOT_AT_POSE wrong pick, GOAL_NOT_MET premature finish, UNGROUNDED_ACTION place chained after a physical pick); worker rejections before motion (OUT_OF_WORKSPACE place outside reach and on the barrier, UNKNOWN_OBJECT pick of the target region), proven by execute called once, backend step +1, info without control_steps, and unchanged sim time, poses and holding; reset after an episode ending while holding restores the seeded initial state. Physical failures after motion are NOT tested."
       ],
       "verification": "ROBOT_AGENT_ROBOSUITE_PYTHON=~/miniconda3/envs/robot_policy/bin/python pytest tests/test_robosuite_env.py -v",
-      "notes": "Commit 45cd36b; seeded resets in Milestone 1 Phase B1. Evidence (gitignored): traces/robosuite_phaseA_v1/ (first recorded sim run, pre-seeding), traces/robosuite_phaseB1_v2/ (init reproducibility + 10-seed AgentLoop baseline; traces/robosuite_phaseB1_v1/ superseded). Same seed reproduces the observed initial state (seeds 0 and 1 across two processes) and, for seeds 0 and 3 (one repeat each), the recorded skill endpoints in this environment (one machine, mujoco 3.3.5); complete per-control-step trajectories have not been compared. The layout fixes cube and target poses; seeds vary cube size and robot init-joint noise only. Worker log is deleted on close; env/worker exceptions are not caught by AgentLoop."
+      "notes": "Commit 45cd36b; seeded resets in Milestone 1 Phase B1. Evidence (gitignored): traces/robosuite_phaseA_v1/ (first recorded sim run, pre-seeding), traces/robosuite_phaseB1_v2/ (init reproducibility + 10-seed AgentLoop baseline; traces/robosuite_phaseB1_v1/ superseded). Same seed reproduces the observed initial state (seeds 0 and 1 across two processes) and, for seeds 0 and 3 (one repeat each), the recorded skill endpoints in this environment (one machine, mujoco 3.3.5); complete per-control-step trajectories have not been compared. The layout fixes cube and target poses; seeds vary cube size and robot init-joint noise only. Worker log is deleted on close; env/worker exceptions are not caught by AgentLoop. Phase B2 evidence: traces/robosuite_phaseB2_v1/ (two full runs, T4/T5 alone, three mutation checks). skills_executed counts worker rejections (backend step increments before rejection)."
     },
     {
       "id": "F005",
@@ -201,11 +202,28 @@
       "verification": "pytest tests/test_memory.py -q",
       "blockers": "Needs a design decision; memory parser change deferred (not part of F010)",
       "notes": "F010 logs UNGROUNDED_ACTION as validation_error, so the F009 parser adds it to failure_codes and records the next independently successful call (usually observe) as a recovery action."
+    },
+    {
+      "id": "B005",
+      "title": "Robosuite failure paths not yet covered through AgentLoop",
+      "status": "open",
+      "acceptance": [
+        "Physical failures after motion through AgentLoop: GRASP_SLIP and the transient retry path, worker OBJECT_NOT_AT_POSE after motion, pick/place POSTCONDITION_FAILED, F007 XY/Z rejections",
+        "Stale grounding after an object moves between delivery and action (F010 'moved')",
+        "Loop terminations on robosuite: failure_budget, max_steps, llm_error; worker crash / RPC hang",
+        "Worker-only branches: ALREADY_HOLDING and NOT_HOLDING (pre-empted by client preconditions), 'transport from beyond the barrier', pick outside reach",
+        "Place far from target then GOAL_NOT_MET then re-pick (non-crossing transport path never run)",
+        "A recovery from a cube displaced from its layout pose, so argument checks can distinguish grounded from hard-coded actions",
+        "Mutation coverage for grounding-provenance fields, CountingEnv attribution, pick/place argument equality and reset equivalence"
+      ],
+      "verification": "ROBOT_AGENT_ROBOSUITE_PYTHON=~/miniconda3/envs/robot_policy/bin/python pytest tests/test_robosuite_env.py -v",
+      "blockers": "Most items need fault injection, a cube displacement path, or worker/loop changes; out of scope for Phase B2",
+      "notes": "Recorded after Phase B2. Place-argument checks cannot detect a hard-coded place because the target pose is a layout constant; a hard-coded seed-0 pick fails only by a ~1.6e-19 settle residue."
     }
   ],
   "meta": {
     "last_updated": "2026-11-07",
     "baseline_commit": "45cd36b",
-    "baseline_test_status": "non-server 128 passed, 9 skipped, 3 deselected; robosuite file 14 passed with ROBOT_AGENT_ROBOSUITE_PYTHON set; full suite with local Ollama 131 passed, 5 skipped (F010)"
+    "baseline_test_status": "non-server 128 passed, 17 skipped, 3 deselected; robosuite file 22 passed with ROBOT_AGENT_ROBOSUITE_PYTHON set; full suite with local Ollama 131 passed, 5 skipped (F010)"
   }
 }
