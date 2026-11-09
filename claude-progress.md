@@ -1,5 +1,17 @@
 # Robot-Agent Development Progress
 
+## Session 2026-11-08: F018 — clearance-aware goal planning and held-object recovery
+
+- policies/planner/executor: `_crowding` physical blockers at goal centres; held cube with a crowded goal is staged;
+  `clearance` = physical place clearance (0.09) and new `staging_margin` (default 0.02); negatives rejected.
+  F016 semantics superseded (F016 behaviour = clearance 0.09 + margin 0.02; f017_robustness.py uses F016-style values).
+- Replay of the frozen F017 matrix (f018_replay.py, traces/f018_replay_v1): 19/20 goal_met; 17 prior successes
+  unchanged; C3 recovers in 8 skills; B0.15nr succeeds in 6; B0.00 (clearance off) bounded livelock as before.
+- Tests: 330 passed, 1 skipped, 3 deselected, 3 warnings (full suite, simulator); parity 756/756; F018 mutations (scratchpad) 7/7 caught.
+- Review: no blocking; applied validation of negative values, record updates, stronger staging assertion, removal
+  of a test-shaped branch (monkeypatch lambda now takes clearance). Limitation: off-centre satisfied cube crowding
+  another goal -> CONFLICTING_GOALS (re-centring not planned).
+
 ## Session 2026-11-08: F016 — physically safe staging for two-cube SWAP (Robosuite)
 
 - policies/planner/executor: optional `clearance` (default 0 keeps mock and CLEAR identical; parity 756/756).

@@ -80,10 +80,10 @@ def test_staging_clearance_is_threaded_through_the_planner():
     s = mock_state(SWAP_LAYOUT)
     stage = lambda p: next((x.x, x.y) for x in p.steps if x.purpose == "stage")  # noqa: E731
     assert stage(plan(TASK.goal, s, bounds=REACH)) == stage(plan(TASK.goal, s, bounds=REACH, clearance=0.0)) == (-0.1, 0.13)
-    p = plan(TASK.goal, s, bounds=REACH, clearance=0.11)
+    p = plan(TASK.goal, s, bounds=REACH, clearance=0.09)  # physical clearance; staging keeps 0.09 + 0.02
     assert isinstance(p, Plan) and p.physical_actions == 6 and stage(p) == (-0.1, 0.08)
     assert all(((stage(p)[0] - x) ** 2 + (stage(p)[1] - y) ** 2) ** 0.5 >= 0.11 for x, y in (TARGET, PARKING))
-    f = plan(TASK.goal, s, bounds=(-0.13, 0.13, 0.12, 0.28), clearance=0.11)
+    f = plan(TASK.goal, s, bounds=(-0.13, 0.13, 0.12, 0.28), clearance=0.09)
     assert f.code == "NO_STAGING"
 
 
@@ -92,10 +92,77 @@ def test_executor_prechecks_place_clearance():
     s = mock_state(TASK.layout)
     held = simulate(s, PlanStep(op="pick", purpose="goal", object_id="cube_red", x=RED0[0], y=RED0[1]))
     near_blue = PlanStep(op="place", purpose="stage", object_id="cube_red", x=TARGET[0] - 0.085, y=TARGET[1])
-    assert "within 0.090 m of cube_blue" in PlanExecutor(TASK.goal, clearance=0.11)._ground(held, near_blue)
+    assert "within 0.090 m of cube_blue" in PlanExecutor(TASK.goal, clearance=0.09)._ground(held, near_blue)
     tc, _ = PlanExecutor(TASK.goal)._ground(held, near_blue)  # mock default: no physical clearance
     assert tc.name == "place"
+    just_clear = PlanStep(op="place", purpose="stage", object_id="cube_red", x=TARGET[0] - 0.095, y=TARGET[1])
+    tc, _ = PlanExecutor(TASK.goal, clearance=0.09, staging_margin=0.06)._ground(held, just_clear)
+    assert tc.name == "place"  # the precheck uses the physical clearance, never clearance + staging margin
 
+
+
+# ------------------------------------------------------------------ F018 clearance-aware goals (mock state, no simulator)
+
+NEAR_PARKING = (-0.08, 0.13)  # 0.07 m from the parking centre, outside the region: a physical blocker
+
+
+def held_c3_state():
+    """F017 C3 after the disturbance: blue held (picked from target), staged red pushed next to parking."""
+    from robot_agent.planner import PlanStep, simulate
+    s = mock_state({**SWAP_LAYOUT, "cube_red": ("cube", *NEAR_PARKING)})
+    return simulate(s, PlanStep(op="pick", purpose="goal", object_id="cube_blue", x=TARGET[0], y=TARGET[1]))
+
+
+def steps(p):
+    return [(x.op, x.object_id, x.purpose) for x in p.steps]
+
+
+def test_held_cube_with_crowded_goal_is_staged_then_blocker_cleared():
+    from robot_agent.planner import Plan, plan
+    s = held_c3_state()
+    old = plan(TASK.goal, s, bounds=REACH)  # clearance disabled: the crowded goal place is planned directly
+    assert steps(old)[0] == ("place", "cube_blue", "goal")
+    p = plan(TASK.goal, s, bounds=REACH, clearance=0.09)
+    assert isinstance(p, Plan) and p.physical_actions == 5 and steps(p) == [
+        ("place", "cube_blue", "stage"), ("pick", "cube_red", "goal"), ("place", "cube_red", "goal"),
+        ("pick", "cube_blue", "goal"), ("place", "cube_blue", "goal"), ("finish", None, "finish")]
+    st = p.steps[0]
+    for x, y in (TARGET, PARKING, NEAR_PARKING):
+        assert ((st.x - x) ** 2 + (st.y - y) ** 2) ** 0.5 >= 0.09 + 0.02
+    f = plan(TASK.goal, s, bounds=(-0.13, 0.13, 0.12, 0.28), clearance=0.09)  # nowhere safe to put blue down
+    assert f.code == "NO_STAGING"
+
+
+def test_crowding_cube_without_goal_is_cleared_before_the_goal_place():
+    from robot_agent.planner import plan
+    lay = {"target": ("target_region", *TARGET), "parking": ("target_region", *PARKING),
+           "cube_blue": ("cube", 0.05, -0.05), "cube_red": ("cube", *NEAR_PARKING)}
+    goals = [TASK.goal[1]]  # blue -> parking only; red has no goal but crowds parking
+    s = mock_state(lay)
+    assert plan(goals, s, bounds=REACH).physical_actions == 2
+    p = plan(goals, s, bounds=REACH, clearance=0.09)
+    assert steps(p)[:2] == [("pick", "cube_red", "clear_blocker"), ("place", "cube_red", "stage")]
+    assert p.physical_actions == 4
+
+
+def test_satisfied_cube_crowding_another_goal_is_a_conflict():
+    from robot_agent.planner import plan
+    lay = {"a": ("target_region", 0.0, 0.2), "b": ("target_region", 0.10, 0.2),
+           "cube_red": ("cube", 0.04, 0.2), "cube_blue": ("cube", 0.0, -0.05)}  # red inside a, 0.06 from b's centre
+    goals = [G("cube_red", "a"), G("cube_blue", "b")]
+    s = mock_state(lay)
+    assert plan(goals, s, bounds=REACH).physical_actions == 2
+    assert plan(goals, s, bounds=REACH, clearance=0.09).code == "CONFLICTING_GOALS"
+
+
+def test_staging_margin_is_separate_from_the_goal_clearance():
+    from robot_agent.planner import plan
+    a5 = {"target": ("target_region", 0.05, 0.2), "parking": ("target_region", -0.07, 0.2),
+          "cube_blue": ("cube", 0.05, 0.2), "cube_red": ("cube", -0.07, 0.2)}  # region centres 0.12 apart
+    s = mock_state(a5)
+    p = plan(TASK.goal, s, bounds=REACH, clearance=0.09, staging_margin=0.06)  # wide staging, goal check stays 0.09
+    st = next(x for x in p.steps if x.purpose == "stage")
+    assert p.physical_actions == 6 and min(((st.x - x) ** 2 + (st.y - y) ** 2) ** 0.5 for x, y in ((0.05, 0.2), (-0.07, 0.2))) >= 0.15
 
 
 sim = pytest.mark.skipif(not os.environ.get("ROBOT_AGENT_ROBOSUITE_PYTHON"), reason="ROBOT_AGENT_ROBOSUITE_PYTHON not set")
@@ -109,12 +176,13 @@ def env():
         yield e
 
 
-def run(env, tmp_path, perturb=None, seed=0, task=TASK, clearance=0.0, bounds=None, transit_budget=None):
+def run(env, tmp_path, perturb=None, seed=0, task=TASK, clearance=0.0, bounds=None, transit_budget=None,
+        staging_margin=0.02):
     env.test_perturb_at, env.test_transit_budget = dict(perturb or {}), transit_budget
     try:
         env.reset(task, seed=seed)  # backend_info (reach) is per reset
         ex = PlanExecutor(task.goal, bounds=bounds or tuple(env.backend_info["reach"]), tolerances=PHYSICAL_TOLERANCES,
-                          clearance=clearance)
+                          clearance=clearance, staging_margin=staging_margin)
         loop = AgentLoop(env, ex, trace_dir=tmp_path, max_turns=20)
         r = loop.run(task, seed=seed)
     finally:
@@ -149,7 +217,7 @@ def delivered_before(ev, seq):
     return [x for x in of(ev, "tool_result") if x["seq"] < seq][-1]["world_state"]
 
 
-def common_checks(r, ev, env):
+def common_checks(r, ev, env, blocker_first=True):
     assert r.success and r.reason == "goal_met", r
     end = of(ev, "episode_end")[-1]
     assert own_goal_check(end["state"]) == [] and end["unmet"] == []
@@ -160,7 +228,7 @@ def common_checks(r, ev, env):
     # Blocker first, from the delivered simulator states: when red first rests in the target, blue is in parking.
     states = [x["world_state"] for x in of(ev, "tool_result")]
     j = next(i for i, s in enumerate(states) if inbox(s, "cube_red", "target"))
-    assert inbox(states[j], "cube_blue", "parking") and inbox(states[0], "cube_blue", "target")
+    assert inbox(states[0], "cube_blue", "target") and (inbox(states[j], "cube_blue", "parking") or not blocker_first)
     # The cube not being handled did not move (state delivered before the call vs simulator state after it).
     for name, args, e in outcomes(ev):
         before = delivered_before(ev, e["seq"])
@@ -302,7 +370,7 @@ SWAP = TASK.model_copy(update={"name": "f016_two_cube_swap",
 
 
 def clearance(env):
-    return env.backend_info["place_clearance"] + 0.02  # worker finger clearance + PLACE_TOL margin
+    return env.backend_info["place_clearance"]  # worker finger clearance; staging adds staging_margin (0.02)
 
 
 def places(ev):
@@ -322,7 +390,7 @@ def test_swap_stages_with_physical_clearance_and_meets_goals(env, tmp_path):
     plan = next(t["meta"]["plan"] for t in of(ev, "llm_turn") if "plan" in t["meta"])
     [stage] = [s for s in plan["steps"] if s["purpose"] == "stage"]
     regions = [TARGET, PARKING]
-    assert all(((stage["x"] - x) ** 2 + (stage["y"] - y) ** 2) ** 0.5 >= c for x, y in regions)
+    assert all(((stage["x"] - x) ** 2 + (stage["y"] - y) ** 2) ** 0.5 >= c + 0.02 for x, y in regions)  # + staging margin
     lo = env.backend_info["reach"]
     assert lo[0] <= stage["x"] <= lo[1] and lo[2] <= stage["y"] <= lo[3]
     staged = of(ev, "tool_result")[2]["world_state"]["objects"]["cube_red"]["pose"]  # after the staging place
@@ -402,3 +470,29 @@ def test_transit_failure_is_bounded_and_fail_closed(env, tmp_path):
     assert not r.success and r.reason == "llm_stopped" and len(of(ev, "env_outcome")) == 2
     stop = [t["meta"] for t in of(ev, "llm_turn") if t["meta"].get("mode") == "stop"][-1]
     assert stop["executor_failure"]["code"] == "LIVELOCK_DETECTED"
+
+
+# ------------------------------------------------------------------ F018 replays of the F017 failures
+
+@sim
+def test_f017_c3_replay_recovers_from_the_held_blue_state(env, tmp_path):
+    env.reset(SWAP, seed=0)
+    r, ev, ex = run(env, tmp_path, task=SWAP, clearance=clearance(env), perturb={2: ("cube_red", *NEAR_PARKING)})
+    common_checks(r, ev, env, blocker_first=False)  # recovery order: blue staged, red placed, then blue parked
+    [rr] = [t["meta"]["replan_reason"] for t in of(ev, "llm_turn") if "replan_reason" in t["meta"]]
+    assert (rr["trigger"], rr["step_index"]) == ("STATE_DEVIATION", 2)
+    replanned = next(t["meta"]["plan"] for t in of(ev, "llm_turn") if t["meta"].get("plan_id") == 1 and "plan" in t["meta"])
+    assert [(s["op"], s["object_id"], s["purpose"]) for s in replanned["steps"][:1]] == [("place", "cube_blue", "stage")]
+    assert ex.replans == 1 and r.failures == 0 and r.skills_executed == 3 + 5
+    assert all(e["outcome"]["ok"] for _, e in places(ev))  # no refused (unsafe) place
+
+
+@sim
+def test_f017_b015_replay_wide_staging_margin_keeps_goal_places_legal(env, tmp_path):
+    a5 = SWAP.model_copy(update={"name": "f018_a5", "layout": {
+        "target": ("target_region", 0.05, 0.20), "cube_blue": ("cube", 0.05, 0.20),
+        "parking": ("target_region", -0.07, 0.20), "cube_red": ("cube", -0.07, 0.20)}})
+    env.reset(a5, seed=5)
+    r, ev, ex = run(env, tmp_path, task=a5, seed=5, clearance=clearance(env), staging_margin=0.06)
+    assert r.success and r.failures == 0 and r.skills_executed == 6 and ex.replans == 0
+    assert all(e["outcome"]["ok"] for _, e in places(ev))

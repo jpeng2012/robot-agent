@@ -106,15 +106,18 @@ class PlanExecutor:
     """Deterministic plan-following LLMClient for trusted InRegion goals (see module docstring)."""
 
     def __init__(self, goals: list[InRegion], bounds: Bounds = WORKSPACE, max_replans: int = 3,
-                 tolerances: Tolerances = MOCK_TOLERANCES, clearance: float = 0.0):
+                 tolerances: Tolerances = MOCK_TOLERANCES, clearance: float = 0.0, staging_margin: float = PLACE_TOL):
         if max_replans < 0:
             raise ValueError("max_replans must be >= 0")
+        if clearance < 0 or staging_margin < 0:
+            raise ValueError("clearance and staging_margin must be >= 0")
         self.goals, self.bounds, self.max_replans = list(goals), bounds, max_replans
         self.tolerances = tolerances
-        # Physical backends (F016): planner staging keeps `clearance` from other cubes and region centres;
-        # every place is pre-checked against `clearance - PLACE_TOL` (the margin covers earlier place error),
-        # so an unsafe place is re-planned instead of sent. 0 (mock) disables both.
-        self.clearance = clearance
+        # Physical backends: `clearance` is the backend's place clearance (robosuite worker: 0.09 m). The planner
+        # treats a cube that close to a goal centre as a blocker and stages at clearance + staging_margin; every
+        # place is pre-checked against `clearance` itself, so an unsafe place is re-planned instead of sent.
+        # 0 (mock) disables all of it.
+        self.clearance, self.staging_margin = clearance, staging_margin
         self._reset()
 
     def _reset(self) -> None:
@@ -211,7 +214,7 @@ class PlanExecutor:
         return self._new_plan(s, reason)
 
     def _new_plan(self, s: WorldState, reason: dict | None) -> AssistantTurn:
-        p = planner.plan(self.goals, s, bounds=self.bounds, clearance=self.clearance)
+        p = planner.plan(self.goals, s, bounds=self.bounds, clearance=self.clearance, staging_margin=self.staging_margin)
         if isinstance(p, PlanningFailure):
             return self._terminal({"planning_failure": {"code": p.code, "subcode": p.subcode, "detail": p.detail}},
                                   reason)
@@ -251,8 +254,8 @@ class PlanExecutor:
             if self.clearance > 0:
                 for oid, o in s.objects.items():
                     if o.kind == "cube" and oid != s.gripper.holding and \
-                            o.pose.dist_xy(issued.x, issued.y) < self.clearance - PLACE_TOL:
-                        return f"place at ({issued.x:.3f}, {issued.y:.3f}) is within {self.clearance - PLACE_TOL:.3f} m of {oid}"
+                            o.pose.dist_xy(issued.x, issued.y) < self.clearance:
+                        return f"place at ({issued.x:.3f}, {issued.y:.3f}) is within {self.clearance:.3f} m of {oid}"
         try:
             expected = planner.simulate(s, issued)  # also rejects occupied destinations (placement_conflict)
         except InvalidStep as e:

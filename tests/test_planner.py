@@ -190,7 +190,7 @@ def test_policy_stop_codes_are_structured():
 
 def test_blocker_not_found_maps_to_structured_failure(monkeypatch):
     # unreachable in cube-only layouts; checks the mapping from the policy's structured stop only
-    monkeypatch.setattr(policies, "_blocker", lambda s, g: None)
+    monkeypatch.setattr(policies, "_blocker", lambda s, g, clearance=0.0: None)
     f = plan([G("cube_red", "target")], state(CLEAR))
     assert isinstance(f, PlanningFailure) and f.code == C.BLOCKER_NOT_FOUND
 

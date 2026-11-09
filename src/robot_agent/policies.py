@@ -45,23 +45,38 @@ def _staging_points(bounds: tuple[float, float, float, float] = WORKSPACE) -> li
 
 
 def _staging(s: WorldState, held: str, bounds: tuple[float, float, float, float] = WORKSPACE,
-             clearance: float = 0.0) -> tuple[float, float] | None:
+             clearance: float = 0.0, margin: float = 0.0) -> tuple[float, float] | None:
     """Nearest free grid point (to the held cube's pre-pick xy) whose footprint is outside every region.
 
-    clearance > 0 (physical backends, F016): the point must also be at least `clearance` from every other
-    cube's centre and every region centre, so neither this place nor later goal places crowd the gripper."""
+    clearance > 0 (physical backends; the worker's finger clearance): the point must also be at least
+    clearance + margin from every other cube's centre and every region centre (margin covers the staged cube's
+    landing error), so neither this place nor later goal places crowd the gripper. clearance 0: no constraint."""
+    need = clearance + margin if clearance > 0 else 0.0
     hx, hy = _xy(s, held)
     regions = [_xy(s, rid) for rid, o in s.objects.items() if o.kind == "target_region"]
     others = [_xy(s, oid) for oid, o in s.objects.items() if o.kind == "cube" and oid != held]
     ok = [(x, y) for x, y in _staging_points(bounds)
           if all(abs(x - rx) >= STAGING_CLEARANCE or abs(y - ry) >= STAGING_CLEARANCE for rx, ry in regions)
           and placement_conflict(s, held, x, y) is None
-          and all(((x - px) ** 2 + (y - py) ** 2) ** 0.5 >= clearance for px, py in [*regions, *others])]
+          and all(((x - px) ** 2 + (y - py) ** 2) ** 0.5 >= need for px, py in [*regions, *others])]
     return min(ok, key=lambda p: (round(((p[0] - hx) ** 2 + (p[1] - hy) ** 2) ** 0.5, 6), p[0], p[1]), default=None)
 
 
-def _blocker(s: WorldState, g: InRegion) -> str | None:
-    """A cube other than g.obj that occupies g's region or overlaps its centre (first by id)."""
+def _crowding(s: WorldState, x: float, y: float, clearance: float, exclude: tuple = ()) -> str | None:
+    """First cube (by id), other than `exclude` and the held cube, whose centre is closer than `clearance` to
+    (x, y): a physical blocker for placing there (finger clearance). None if clearance <= 0."""
+    if clearance <= 0:
+        return None
+    for oid in sorted(s.objects):
+        o = s.objects[oid]
+        if o.kind == "cube" and oid not in exclude and oid != s.gripper.holding and o.pose.dist_xy(x, y) < clearance:
+            return oid
+    return None
+
+
+def _blocker(s: WorldState, g: InRegion, clearance: float = 0.0) -> str | None:
+    """A cube other than g.obj that occupies g's region or overlaps its centre (first by id); with
+    clearance > 0, otherwise a cube within `clearance` of the region centre (physical blocker)."""
     dx, dy = _xy(s, g.region)
     for oid in sorted(s.objects):
         o = s.objects[oid]
@@ -70,7 +85,7 @@ def _blocker(s: WorldState, g: InRegion) -> str | None:
         if _inside(s, g.region, o.pose.x, o.pose.y) or (
                 abs(o.pose.x - dx) < 2 * CUBE_HALF and abs(o.pose.y - dy) < 2 * CUBE_HALF):
             return oid
-    return None
+    return _crowding(s, dx, dy, clearance, exclude=(g.obj,))
 
 
 def _text(msg: str, code: str, **meta) -> AssistantTurn:
@@ -84,7 +99,10 @@ def _act(name: str, mode: str, **args) -> AssistantTurn:
 
 
 def decide(s: WorldState | None, subgoals: list[InRegion], aware: bool,
-           bounds: tuple[float, float, float, float] = WORKSPACE, clearance: float = 0.0) -> AssistantTurn:
+           bounds: tuple[float, float, float, float] = WORKSPACE, clearance: float = 0.0,
+           staging_margin: float = 0.0) -> AssistantTurn:
+    """clearance > 0: a goal destination with another cube within `clearance` of its centre counts as blocked
+    (held: stage the held cube; empty: clear that cube first). Staging keeps clearance + staging_margin."""
     if s is None:
         return _act("observe", "observe")
     if all(g.holds(s) for g in subgoals):
@@ -98,16 +116,18 @@ def decide(s: WorldState | None, subgoals: list[InRegion], aware: bool,
                 return _text(f"holding {held}, which has no subgoal", "NO_SUBGOAL_FOR_HELD")
             x, y = _xy(s, g.region)
             return _act("place", "goal", x=x, y=y)
-        if g is not None and placement_conflict(s, held, *_xy(s, g.region)) is None:
+        if g is not None and placement_conflict(s, held, *_xy(s, g.region)) is None \
+                and _crowding(s, *_xy(s, g.region), clearance) is None:
             x, y = _xy(s, g.region)
             return _act("place", "goal", x=x, y=y)
-        spot = _staging(s, held, bounds, clearance)
+        spot = _staging(s, held, bounds, clearance, staging_margin)
         if spot is None:
             return _text(f"no valid staging location for {held}", "NO_STAGING")
         return _act("place", "stage", x=spot[0], y=spot[1])
     g = next(g for g in subgoals if not g.holds(s))
-    if aware and placement_conflict(s, g.obj, *_xy(s, g.region)) is not None:
-        b = _blocker(s, g)
+    if aware and (placement_conflict(s, g.obj, *_xy(s, g.region)) is not None
+                  or _crowding(s, *_xy(s, g.region), clearance, exclude=(g.obj,)) is not None):
+        b = _blocker(s, g, clearance)
         if b is None:
             return _text(f"{g} is blocked but no blocking cube was found", "BLOCKER_NOT_FOUND")
         if b in goal_of and goal_of[b].holds(s):

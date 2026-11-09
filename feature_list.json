@@ -277,7 +277,20 @@
         "Test-only worker configure_test(transit_budget): transit budget 0 -> POSTCONDITION_FAILED 'pick not attempted', nothing touched; through AgentLoop 2 attempts then LIVELOCK_DETECTED"
       ],
       "verification": "ROBOT_AGENT_ROBOSUITE_PYTHON=... uv run python -m pytest -q -m 'not requires_server'",
-      "notes": "Review (no blocking) follow-ups not applied: one clearance value drives both staging (worker clearance + PLACE_TOL) and the place precheck (clearance - PLACE_TOL), consistent only at 0.11; worker reset does not check a cube inside one region against the other region's centre; tests do not pin the precheck's upper side, a goal-purpose precheck, or the cube half of the staging filter; control test could assert exactly 2 refusals; SWAP reproducibility omits eef pose; planner does not treat near-but-not-overlapping cubes as blockers (livelock stop on solvable disturbed states); zero worst-case margin at 0.11."
+      "notes": "Review (no blocking) follow-ups not applied: one clearance value drives both staging (worker clearance + PLACE_TOL) and the place precheck (clearance - PLACE_TOL), consistent only at 0.11; worker reset does not check a cube inside one region against the other region's centre; tests do not pin the precheck's upper side, a goal-purpose precheck, or the cube half of the staging filter; control test could assert exactly 2 refusals; SWAP reproducibility omits eef pose; planner does not treat near-but-not-overlapping cubes as blockers (livelock stop on solvable disturbed states); zero worst-case margin at 0.11. SUPERSEDED SEMANTICS (F018): `clearance` now means the backend's physical place clearance (0.09); staging uses clearance + staging_margin (default 0.02) and the precheck uses clearance itself. F016 behaviour is reproduced by clearance=0.09, staging_margin=0.02. f017_robustness.py passes F016-style values (0.11) and must be read with that mapping (see f018_replay.py)."
+    },
+    {
+      "id": "F018",
+      "title": "Clearance-aware goal planning and held-object recovery (Robosuite two-cube)",
+      "status": "complete (pending commit approval)",
+      "acceptance": [
+        "policies._crowding: a cube (not held, not the goal cube) whose centre is < clearance from a goal region centre blocks that goal; _blocker falls back to it; decide: held cube with a crowded goal is staged, empty gripper clears the crowding cube first (or CONFLICTING_GOALS if it already satisfies its own goal); planner._prioritised uses the same test",
+        "Separated parameters: plan/PlanExecutor(clearance=physical place clearance, staging_margin=PLACE_TOL); staging needs clearance + margin, goal destinations and the executor precheck need clearance; negative values rejected; clearance 0 disables everything (parity 756/756)",
+        "Replay of the frozen F017 matrix (f018_replay.py, traces/f018_replay_v1): 19/20 goal_met; the 17 F017 successes unchanged in outcome, skill count and staging; C3 recovers from the held-blue state in 8 skills (stage blue, red->target, blue->parking); B0.15nr succeeds in 6; B0.00 (clearance disabled) still a bounded livelock",
+        "tests/test_robosuite_multi.py: mock-level held-state recovery, crowding blocker without goal, satisfied-crowder conflict, staging-margin separation, precheck threshold both sides; simulator replays of C3 and B0.15nr"
+      ],
+      "verification": "ROBOT_AGENT_ROBOSUITE_PYTHON=... uv run python -m pytest -q -m 'not requires_server'",
+      "notes": "Review: no blocking. Known limitations: a satisfied cube off-centre in its region toward another goal is reported CONFLICTING_GOALS although re-centring it would solve the task; decide/_staging keep margin default 0.0 (plan/PlanExecutor default 0.02); exact 0.11-spacing boundary and several crowding edge cases (exactly-at-clearance, held cube without goal, crowder with a free own goal, held goal crowded by a satisfied cube) untested; one trial per simulated scenario. tests/test_planner.py monkeypatch lambda now accepts the clearance argument."
     }
   ],
   "backlog": [
@@ -365,7 +378,7 @@
   "meta": {
     "last_updated": "2026-11-08",
     "baseline_commit": "45cd36b",
-    "baseline_test_status": "full suite with ROBOT_AGENT_ROBOSUITE_PYTHON set: 324 passed, 1 skipped, 3 deselected (F016); full suite with local Ollama 131 passed, 5 skipped (F010)",
+    "baseline_test_status": "full suite with ROBOT_AGENT_ROBOSUITE_PYTHON set: 330 passed, 1 skipped, 3 deselected, 3 warnings (F018); full suite with local Ollama 131 passed, 5 skipped (F010)",
     "findings_doc": "docs/robot_agent_f011_f014_findings.md",
     "next_research_direction": "undecided: (1) language grounding with independent confirmation, (2) model learning for planning/grounding, (3) embodied multi-object execution"
   }

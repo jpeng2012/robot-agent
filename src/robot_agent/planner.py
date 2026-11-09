@@ -1,6 +1,6 @@
 """Symbolic dependency planner for unordered in-region goals (F012b-2, mock backend only).
 
-plan(goals, state, bounds=WORKSPACE, max_physical=None) -> Plan | PlanningFailure
+plan(goals, state, bounds=WORKSPACE, max_physical=None, clearance=0.0, staging_margin=PLACE_TOL) -> Plan | PlanningFailure
 simulate(state, step) -> WorldState  (the rollout transition, also used by executor.PlanExecutor)
 
 The planner never touches a RobotEnv: it rolls the dependency-aware step policy (policies.decide, aware=True)
@@ -21,6 +21,7 @@ from pydantic import BaseModel
 
 from robot_agent.env import CARRY_Z, GRASP_TOL
 from robot_agent.goals import InRegion
+from robot_agent.skills import PLACE_TOL
 from robot_agent import policies
 from robot_agent.world import REGION_HALF, WORKSPACE, GripperObs, Pose, WorldState, placement_conflict
 
@@ -165,7 +166,7 @@ def simulate(state: WorldState, step: PlanStep) -> WorldState:
     return state.model_copy(update={"objects": objs, "gripper": grip, "step": state.step + 1})
 
 
-def _prioritised(s: WorldState, base: list[InRegion]) -> list[InRegion]:
+def _prioritised(s: WorldState, base: list[InRegion], clearance: float = 0.0) -> list[InRegion]:
     goal_obj = {g.obj for g in base}
 
     def key(ig):
@@ -173,22 +174,27 @@ def _prioritised(s: WorldState, base: list[InRegion]) -> list[InRegion]:
         if g.holds(s):
             return (3, i)
         r = s.objects[g.region].pose
-        if placement_conflict(s, g.obj, r.x, r.y) is None:
+        if placement_conflict(s, g.obj, r.x, r.y) is None and \
+                policies._crowding(s, r.x, r.y, clearance, exclude=(g.obj,)) is None:
             return (0, i)
-        b = policies._blocker(s, g)
+        b = policies._blocker(s, g, clearance)
         return (1 if b is not None and b not in goal_obj else 2, i)
     return [g for _, g in sorted(enumerate(base), key=key)]
 
 
 def plan(goals, state: WorldState, bounds: Bounds = WORKSPACE, max_physical: int | None = None,
-         clearance: float = 0.0) -> Plan | PlanningFailure:
+         clearance: float = 0.0, staging_margin: float = PLACE_TOL) -> Plan | PlanningFailure:
     """Plan for unordered InRegion goals from an authoritative WorldState (not modified).
 
     If every goal already holds, the plan is just finish, even while an unrelated cube is held.
-    clearance (default 0, mock): minimum staging distance from other cubes and region centres (policies._staging);
-    if no grid point qualifies the result is PlanningFailure NO_STAGING."""
+    clearance (default 0, mock: disabled) is the backend's physical place clearance. With clearance > 0 a goal
+    destination is blocked while another cube's centre is within `clearance` of the region centre (that cube is
+    cleared first; a held cube whose goal is crowded is staged), and staging keeps clearance + staging_margin
+    from every other cube and region centre. No qualifying staging point: PlanningFailure NO_STAGING."""
     if max_physical is not None and max_physical < 0:
         raise ValueError("max_physical must be >= 0")
+    if clearance < 0 or staging_margin < 0:
+        raise ValueError("clearance and staging_margin must be >= 0")
     held = state.gripper.holding
     if held is not None and (held not in state.objects or state.objects[held].kind != "cube"):
         return _fail(PlanningFailureCode.INVALID_STATE, f"gripper holds {held!r}, not a known cube", "HELD_OBJECT")
@@ -217,7 +223,8 @@ def plan(goals, state: WorldState, bounds: Bounds = WORKSPACE, max_physical: int
     s = state.model_copy(deep=True)
     steps: list[PlanStep] = []
     while True:
-        turn = policies.decide(s, _prioritised(s, base), aware=True, bounds=bounds, clearance=clearance)
+        turn = policies.decide(s, _prioritised(s, base, clearance), aware=True, bounds=bounds, clearance=clearance,
+                               staging_margin=staging_margin)
         if not turn.tool_calls:
             code = turn.meta.get("code")  # structured stop from the policy
             if code in POLICY_STOPS:
