@@ -62,8 +62,23 @@ class _Pending:
     reason: dict | None = None       # carried replan reason for a recovery observe
 
 
-def deviation(expected: WorldState, actual: WorldState) -> str | None:
-    """Why `actual` differs from `expected` beyond PLACE_TOL (held object, object set, kinds, poses)."""
+@dataclass(frozen=True)
+class Tolerances:
+    """Reconciliation tolerances. Object identities, kinds and the held object are always compared exactly."""
+    xy: float = PLACE_TOL       # every non-held object (resting cubes, regions)
+    z: float = PLACE_TOL
+    held_pose: bool = True      # also compare the held object's pose with the nominal (mock) carry pose
+
+
+MOCK_TOLERANCES = Tolerances()
+# Physical backends (F015 robosuite): resting xy as tight as the place postcondition (PLACE_TOL), resting z
+# as the InRegion / worker resting tolerance; the carried pose is not predicted (grasp offset and lift
+# height vary) and is already checked by the pick postcondition (CARRY_XY_TOL, MIN_CARRY_Z).
+PHYSICAL_TOLERANCES = Tolerances(xy=PLACE_TOL, z=0.025, held_pose=False)
+
+
+def deviation(expected: WorldState, actual: WorldState, tol: Tolerances = MOCK_TOLERANCES) -> str | None:
+    """Why `actual` differs from `expected` beyond `tol` (held object, object set, kinds, poses)."""
     if expected.gripper.holding != actual.gripper.holding:
         return f"holding {actual.gripper.holding!r}, expected {expected.gripper.holding!r}"
     if set(expected.objects) != set(actual.objects):
@@ -72,8 +87,10 @@ def deviation(expected: WorldState, actual: WorldState) -> str | None:
         e, a = expected.objects[oid], actual.objects[oid]
         if e.kind != a.kind:
             return f"{oid} is a {a.kind}, expected {e.kind}"
+        if not tol.held_pose and oid == actual.gripper.holding:
+            continue
         d, dz = a.pose.dist_xy(e.pose.x, e.pose.y), abs(a.pose.z - e.pose.z)
-        if d > PLACE_TOL or dz > PLACE_TOL:
+        if d > tol.xy or dz > tol.z:
             return f"{oid} at ({a.pose.x:.3f}, {a.pose.y:.3f}, {a.pose.z:.3f}), expected " \
                    f"({e.pose.x:.3f}, {e.pose.y:.3f}, {e.pose.z:.3f})"
     return None
@@ -88,10 +105,12 @@ def _signature(s: WorldState) -> str:
 class PlanExecutor:
     """Deterministic plan-following LLMClient for trusted InRegion goals (see module docstring)."""
 
-    def __init__(self, goals: list[InRegion], bounds: Bounds = WORKSPACE, max_replans: int = 3):
+    def __init__(self, goals: list[InRegion], bounds: Bounds = WORKSPACE, max_replans: int = 3,
+                 tolerances: Tolerances = MOCK_TOLERANCES):
         if max_replans < 0:
             raise ValueError("max_replans must be >= 0")
         self.goals, self.bounds, self.max_replans = list(goals), bounds, max_replans
+        self.tolerances = tolerances
         self._reset()
 
     def _reset(self) -> None:
@@ -157,7 +176,7 @@ class PlanExecutor:
             code = (content.get("error") or {}).get("code")
             trig = Trigger.GOAL_NOT_MET if code == FailureCode.GOAL_NOT_MET else Trigger.EXECUTION_FAILURE
             return s, {"trigger": trig, "code": code, "detail": (content.get("error") or {}).get("detail"), **base}
-        if p.expected is not None and (why := deviation(p.expected, s)) is not None:
+        if p.expected is not None and (why := deviation(p.expected, s, self.tolerances)) is not None:
             return s, {"trigger": Trigger.STATE_DEVIATION, "code": None, "detail": why, **base}
         return s, None
 

@@ -489,7 +489,7 @@ def test_deviation_tolerance():
 
 
 def test_executor_has_no_environment_access():
-    assert list(inspect.signature(PlanExecutor).parameters) == ["goals", "bounds", "max_replans"]
+    assert list(inspect.signature(PlanExecutor).parameters) == ["goals", "bounds", "max_replans", "tolerances"]
     src = Path(inspect.getsourcefile(executor_module)).read_text()
     for forbidden in ("MockTabletopEnv", "RobotEnv", "RobosuiteEnv", ".execute(", ".observe(", "task.goal"):
         assert forbidden not in src

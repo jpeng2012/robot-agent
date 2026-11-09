@@ -252,6 +252,19 @@
         "Qwen3 abstained 0/18 on should-abstain items (always proposed goals); verifier blocked 18/18; 92/92 evidence spans verbatim but 67/92 bindings supported"
       ],
       "notes": "Development set only (same author as verifier). Known frozen-verifier defect: modal constructions ('should end up in', 'needs to go into') rejected as UNCLEAR_STRUCTURE (P3r/P3b/X2/E04 false rejections); not fixed post hoc. Coverage gain comes from the deterministic analyser (B <= C by construction), not from the LLM. Consolidated in docs/robot_agent_f011_f014_findings.md."
+    },
+    {
+      "id": "F015",
+      "title": "Two-cube Robosuite manipulation with the symbolic planner and PlanExecutor (Panda, trusted gold goals)",
+      "status": "complete (pending commit approval)",
+      "acceptance": [
+        "robosuite_worker.py: TwoCubeScene (ConstrainedPickPlace + blue cube_b of fixed size + second region marker; barrier moved off the table) and TwoCubeBackend(Backend) selected by init(scene='two_cube'); single-cube Backend byte-identical to HEAD except main()'s constructor line",
+        "Two-cube worker: stable ids (red-named id -> red Lift cube), per-cube z reference, per-cube grasp detection, expert fed the commanded cube, high-retreat transit before a vertical approach (fails closed if it does not converge), place refused within PLACE_CLEARANCE=0.09 m of another cube, reset refuses layouts without finger clearance, test-only transactional schedule_perturb",
+        "executor.Tolerances / PHYSICAL_TOLERANCES (resting xy 0.02, z 0.025, carried pose not compared; identity and holding exact); default MOCK_TOLERANCES unchanged",
+        "tests/test_robosuite_multi.py (20): nominal CLEAR goal_met in 4 skills, 0 failures, 0 replans, blue parked before red placed (from delivered states), uninvolved cube < 5 mm, no grounding violations, goals verified from simulator observations; same seed exactly reproduced; perturbed red -> OBJECT_NOT_AT_POSE after motion -> 1 replan -> goal_met; invalid perturbations refused without change; clearance threshold both sides; tolerance-profile unit tests"
+      ],
+      "verification": "ROBOT_AGENT_ROBOSUITE_PYTHON=... uv run python -m pytest tests/test_robosuite_multi.py tests/test_robosuite_env.py -q && uv run python -m pytest -q -m 'not requires_server'",
+      "notes": "One fixed layout and seed family; no staging, cycles or barrier navigation (planner staging is unaware of PLACE_CLEARANCE: a refused staging place would end in LIVELOCK_DETECTED). In the measured runs the carried pose stayed within mock tolerances, so PHYSICAL_TOLERANCES' held-pose relaxation was not exercised physically. Transit non-convergence guard untested (never triggered). Reproducibility measured within one worker process on one build. tests/test_executor.py signature assertion updated for the new tolerances keyword."
     }
   ],
   "backlog": [
@@ -339,7 +352,7 @@
   "meta": {
     "last_updated": "2026-11-08",
     "baseline_commit": "45cd36b",
-    "baseline_test_status": "non-server 280 passed, 17 skipped, 3 deselected (F012c); robosuite file 22 passed with ROBOT_AGENT_ROBOSUITE_PYTHON set; full suite with local Ollama 131 passed, 5 skipped (F010)",
+    "baseline_test_status": "full suite with ROBOT_AGENT_ROBOSUITE_PYTHON set: 316 passed, 1 skipped, 3 deselected (F015); robosuite single-cube file 22 passed; full suite with local Ollama 131 passed, 5 skipped (F010)",
     "findings_doc": "docs/robot_agent_f011_f014_findings.md",
     "next_research_direction": "undecided: (1) language grounding with independent confirmation, (2) model learning for planning/grounding, (3) embodied multi-object execution"
   }

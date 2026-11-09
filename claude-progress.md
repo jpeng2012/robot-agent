@@ -1,5 +1,30 @@
 # Robot-Agent Development Progress
 
+## Session 2026-11-08: F015 — two-cube Robosuite manipulation with planner + PlanExecutor
+
+### Changes
+- robosuite_worker.py: TwoCubeScene + TwoCubeBackend (scene="two_cube"); single-cube Backend unchanged.
+- robosuite_env.py: `scene=` and test-only `test_perturb_at` (sent after each reset).
+- executor.py: optional `tolerances` (PHYSICAL_TOLERANCES); mock default unchanged.
+- tests/test_robosuite_multi.py (new, 20); tests/test_executor.py signature assertion includes `tolerances`.
+
+### Verification
+```bash
+ROBOT_AGENT_ROBOSUITE_PYTHON=~/miniconda3/envs/robot_policy/bin/python uv run python -m pytest tests/test_robosuite_multi.py -q  # 20 passed
+ROBOT_AGENT_ROBOSUITE_PYTHON=... uv run python -m pytest tests/test_robosuite_env.py -q   # 22 passed
+ROBOT_AGENT_ROBOSUITE_PYTHON=... uv run python -m pytest -q -m "not requires_server"       # 316 passed, 1 skipped
+```
+- Measured: nominal goal_met, 4 skills, 0 failures, 0 replans; perturbed run 5 skills, 1 failure
+  (OBJECT_NOT_AT_POSE, no_grasp_contact), 1 replan, goal_met; same seed reproduced exactly.
+- Mutation script (scratchpad): 10/11 caught; transit non-convergence guard survives (never triggered).
+- Architecture + verification reviews: no blocking findings; should-fix items applied (subclass instead of
+  setattr, fixed cube_b size, perturbation record kept on early refusals, transit fail-closed, reset
+  clearance checks, non-vacuous reproducibility, independent ordering/displacement checks, more branches).
+
+### Remaining limitations
+- One layout; no staging/cycles/barrier; planner staging unaware of PLACE_CLEARANCE (would livelock-stop).
+- Held-pose relaxation not exercised physically; reproducibility within one process/build only.
+
 ## Session 2026-11-08: F011–F014 consolidation and milestone closure (documentation only)
 
 - Findings report: docs/robot_agent_f011_f014_findings.md (architecture evolution, result tables with denominators, failure examples,
