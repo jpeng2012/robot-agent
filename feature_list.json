@@ -186,6 +186,23 @@
       ],
       "verification": "pytest tests/test_policies.py -v",
       "notes": "No changes to AgentLoop, mock env, goal checker, memory, SYSTEM_PROMPT, tool schemas or existing policies; no CLI, live LLM or disturbance (B006) work. Proactive measures differ by design: the trace count is outcome-based (blocker left another object's goal region before any attempt to fill it), meta is decision intent, so naive/correct counts 1 vs 0 and swap 2 vs 1. Deferred limitations: (a) stop paths untested — 'conflicting goals' (needs overlapping regions), 'no valid staging location', 'blocked but no blocking cube', naive 'holding a cube with no subgoal', and the duplicate-object constructor check; (b) a subgoal object or region missing from the delivered state raises KeyError, which AgentLoop reports as llm_error rather than a typed stop; (c) _blocker duplicates placement_conflict geometry and the equivalence test covers only states traced in four layouts (no overlapping regions, boundary cases or two cubes in one region); (d) On-goal tasks unsupported; (e) no evaluation harness or live comparison yet."
+    },
+    {
+      "id": "F012b-2",
+      "title": "Symbolic dependency planner for unordered in-region goals (mock backend)",
+      "status": "complete",
+      "acceptance": [
+        "robot_agent.planner.plan(goals, state, bounds=WORKSPACE, max_physical=None) -> Plan | PlanningFailure (pydantic); never touches a RobotEnv; the input WorldState is deep-copied and unchanged",
+        "Strict validation: InRegion only with REGION_HALF; unknown/non-cube objects, unknown/non-region regions, duplicates, empty -> INVALID_GOALS (subcode); two cubes one region / one cube two regions -> INFEASIBLE_GOALS; bounds outside WORKSPACE, goal region or pick outside bounds -> OUT_OF_BOUNDS; overlapping regions or non-cube/region objects -> UNSUPPORTED_GEOMETRY; inconsistent held object -> INVALID_STATE",
+        "Goals canonicalised (sorted (object_id, region)); presentation order cannot influence the plan",
+        "Rollout of policies.decide(aware=True) over mock kinematics with per-turn priority: destination free first, then blocker without its own goal, then cycles (one staging move each), canonical tie-break",
+        "Structured policy stops: decide() text-only turns carry meta['code'] (NO_SUBGOAL_FOR_HELD, NO_STAGING, BLOCKER_NOT_FOUND, CONFLICTING_GOALS); text unchanged; planner maps them without substring matching; unknown stops and policy-proposed conflicting places -> PLANNER_INTERNAL",
+        "Staging grid parameterised by bounds and shared: policies._staging_points(bounds=WORKSPACE), _staging(s, held, bounds=WORKSPACE), decide(..., bounds=WORKSPACE); defaults preserve F011b-1 behaviour",
+        "Bound 4 * n_cubes physical actions (BOUND_EXCEEDED); finish checked before the bound",
+        "Not connected to AgentLoop; plans are open-loop and must be grounded and re-planned by a future executor (F012c)"
+      ],
+      "verification": "pytest tests/test_planner.py -q (53 passed); pytest tests/ -q -m 'not requires_server' (225 passed, 17 skipped, 3 deselected); ROBOT_AGENT_ROBOSUITE_PYTHON=... pytest tests/test_robosuite_env.py -q (22 passed); python f012b2_parity.py f012b2_parity_v2 (eval-only, uncommitted: 109/109 strictly valid by replay, == BFS, step sequences identical to the F012b-1 evaluation planner, permutation-identical, input unchanged; 54 bounded-workspace cases identical to F012b-1; 756 gates); python f011c_eval.py dry-run f011c_dryrun_f012b2 (30/30 reference metrics and trajectories identical to dryrun_v5); 20 source mutations each caught (scratchpad mutate_f012b2.py, sources restored by hash)",
+      "notes": "Evidence of optimality is empirical on the F012b-1 corpus (cube-only, disjoint regions, up to 4 cubes, full workspace for BFS; BFS ignores bounds). BLOCKER_NOT_FOUND and the policy CONFLICTING_GOALS stop are unreachable through validated inputs and are tested via monkeypatch / decide() directly. Plans carry no expected post-states yet. Robosuite supports one cube and one region and its reach/barrier are not expressible as rectangular bounds. LLM-extracted goals must not be connected (F012a-2: unsafe on unsupported/ambiguous instructions)."
     }
   ],
   "backlog": [
@@ -271,8 +288,8 @@
     }
   ],
   "meta": {
-    "last_updated": "2026-11-07",
+    "last_updated": "2026-11-08",
     "baseline_commit": "45cd36b",
-    "baseline_test_status": "non-server 172 passed, 17 skipped, 3 deselected (F011b-1); robosuite file 22 passed with ROBOT_AGENT_ROBOSUITE_PYTHON set; full suite with local Ollama 131 passed, 5 skipped (F010)"
+    "baseline_test_status": "non-server 225 passed, 17 skipped, 3 deselected (F012b-2); robosuite file 22 passed with ROBOT_AGENT_ROBOSUITE_PYTHON set; full suite with local Ollama 131 passed, 5 skipped (F010)"
   }
 }

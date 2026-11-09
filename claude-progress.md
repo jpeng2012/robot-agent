@@ -1,5 +1,52 @@
 # Robot-Agent Development Progress
 
+## Session 2026-11-08: F011c–F012b-2 — Qwen3 multi-object evaluation, goal grounding, symbolic planner
+
+### Evaluation-only work (uncommitted scripts in repo root; evidence gitignored under traces/)
+- F011c Stage 1 (f011c_eval.py, traces/f011c_clear_target_v1/): Qwen3:8b, P-call isolation, 15/15 valid.
+  S1/S4/S5 goal_met optimal; S2 (unhinted red-first) max_steps and S3 (rejected prefix) failure_budget,
+  both context-limited after the decisive error. First harmful decision: red placed into parking (blue's goal).
+- Plan-first (f011c_planfirst.py, traces/f011c_planfirst_v1/): the plan was emitted with the observe call
+  (not_separate, unparseable prose) 3/3; failure_budget.
+- Plan-only on the authoritative S2 state (f011c_planonly.py): invalid red-first plan 3/3. Goal order reversed
+  (f011d_goalorder.py): optimal 3/3, no dependency stated. Validate-and-repair (f011d_repair.py): same invalid
+  plan for 3 candidates, 0/3 repaired.
+- F012a goal extraction (f012a_goals.py, f012a_items.json, traces/f012a_extract_v1/): 22 items + 6 repeats.
+  Clear instructions 15/16 exact (pairs order-invariant, contradictions extracted and rejected as infeasible);
+  0/4 abstentions (invented goals; 2 would pass validation); no-state items invent ids. Not safe to connect
+  to execution.
+- F012b-1 planner (f012b_planner.py, traces/f012b_planner_v4/): 703 gates; 109 feasible cases valid and equal
+  to an independent BFS relaxation optimum (witness replayed); goal re-prioritisation fixed 4/30 suboptimal cases.
+
+### F012b-2 production changes
+- src/robot_agent/planner.py (new): plan(goals, state, bounds, max_physical) -> Plan | PlanningFailure.
+- src/robot_agent/policies.py: bounded staging shared via _staging_points(bounds)/_staging(..., bounds)/
+  decide(..., bounds); structured stop codes in meta["code"] (text unchanged); defaults preserve F011b-1.
+- tests/test_planner.py (new): 53 tests (execution through AgentLoop, permutation invariance, chain and
+  cycle ordering, structured failures, bound edges, tie-breaks, non-mutation of state/env).
+
+### Verification
+```bash
+pytest tests/test_planner.py -q             # 53 passed
+pytest tests/ -q -m "not requires_server"   # 225 passed, 17 skipped, 3 deselected
+ROBOT_AGENT_ROBOSUITE_PYTHON=~/miniconda3/envs/robot_policy/bin/python pytest tests/test_robosuite_env.py -q  # 22 passed
+python f012b2_parity.py f012b2_parity_v2    # 109 + 54 bounded cases, 756 gates pass (eval-only)
+python f011c_eval.py dry-run f011c_dryrun_f012b2   # reference metrics/trajectories identical to dryrun_v5
+```
+- 20 mutations (ordering, priority rules, tie-break, occupancy checks, staging clearance/bounds, failure
+  classification, validation checks, bound default/off-by-one, edge comparisons, input mutation, canonical
+  order) each caught; sources restored by hash.
+- Independent architecture and verification reviews: GO; should-fix items applied (PLANNER_INTERNAL for
+  internal faults and unknown stops, explicit stop-code check instead of assert, INVALID_STATE, Literal step
+  fields, bound/tie-break/boundary tests, gated and bounded parity).
+
+### Remaining limitations
+- Plans are open-loop and carry no expected post-states; F012c must ground each step and re-plan.
+- Optimality is empirical (cube-only, disjoint regions, <= 4 cubes); BFS ignores bounds.
+- BLOCKER_NOT_FOUND / policy CONFLICTING_GOALS stops are unreachable through validated input (tested via
+  monkeypatch / decide()). Robosuite: one cube and one region; reach and barrier not modelled.
+- Rerunning frozen eval harnesses now records a different src diff hash (expected).
+
 ## Session 2026-11-08: F011b-1 — naive vs dependency-aware deterministic policies (mock)
 
 ### Changes (new files only)
