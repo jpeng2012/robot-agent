@@ -203,6 +203,22 @@
       ],
       "verification": "pytest tests/test_planner.py -q (53 passed); pytest tests/ -q -m 'not requires_server' (225 passed, 17 skipped, 3 deselected); ROBOT_AGENT_ROBOSUITE_PYTHON=... pytest tests/test_robosuite_env.py -q (22 passed); python f012b2_parity.py f012b2_parity_v2 (eval-only, uncommitted: 109/109 strictly valid by replay, == BFS, step sequences identical to the F012b-1 evaluation planner, permutation-identical, input unchanged; 54 bounded-workspace cases identical to F012b-1; 756 gates); python f011c_eval.py dry-run f011c_dryrun_f012b2 (30/30 reference metrics and trajectories identical to dryrun_v5); 20 source mutations each caught (scratchpad mutate_f012b2.py, sources restored by hash)",
       "notes": "Evidence of optimality is empirical on the F012b-1 corpus (cube-only, disjoint regions, up to 4 cubes, full workspace for BFS; BFS ignores bounds). BLOCKER_NOT_FOUND and the policy CONFLICTING_GOALS stop are unreachable through validated inputs and are tested via monkeypatch / decide() directly. Plans carry no expected post-states yet. Robosuite supports one cube and one region and its reach/barrier are not expressible as rectangular bounds. LLM-extracted goals must not be connected (F012a-2: unsafe on unsupported/ambiguous instructions)."
+    },
+    {
+      "id": "F012c",
+      "title": "Closed-loop symbolic plan execution and bounded replanning (mock backend), with B006 fault guards",
+      "status": "complete",
+      "acceptance": [
+        "src/robot_agent/executor.py: PlanExecutor(goals, bounds=WORKSPACE, max_replans=3) implements LLMClient; AgentLoop, prompts, skills, grounding, verify and goal_check unchanged; no env handle (reads only tool results in messages); per-episode state reset",
+        "Observe first if no state delivered; plans from the delivered state with planner.plan; one tool call per turn; pick at the delivered object pose (precheck: within GRASP_TOL of plan pose and inside executor bounds), goal place at the delivered region centre, staging place at the planned point; every pick/place predicted with planner.simulate (which also rejects occupied destinations); finish only when every executor goal holds in the delivered state",
+        "Reconciliation before advancing: the pending call's result must be the newest tool message with a world_state, not older than its grounding, and an ok pick/place must show an executed skill (else MISSING_FEEDBACK / STALE_FEEDBACK -> observe + replan); failed results (after the loop's transient retries; GOAL_NOT_MET separate) and deviations beyond PLACE_TOL trigger replans",
+        "Bounded: max_replans (REPLAN_BUDGET_EXHAUSTED); a second replan from a physically identical state is LIVELOCK_DETECTED (one re-attempt per unchanged-state failure, wherever it occurs); AgentLoop max_turns/max_failures unchanged",
+        "Trace via AssistantTurn.meta only: executor, mode, plan_id, step_index, purpose, replans; plan + source_step on a plan's first turn; replan_reason {trigger, code, detail, plan_id, step_index, call}; terminal text-only stops carry planning_failure {code, subcode, detail} or executor_failure {code, detail} and repeat (llm_stopped)",
+        "planner.simulate(state, step) public, pure, shared with the planner rollout; InvalidStep for steps the mock would reject and for finish; plan() maps a rejection to PLANNER_INTERNAL/SIMULATE_REJECTED",
+        "B006: perturb_at only moves known, non-held cubes to points free under placement_conflict (held cube not an obstacle); silent_drop landing point checked likewise; otherwise InvalidFault; fail_once honoured for place (cube stays held)"
+      ],
+      "verification": "uv run python -m pytest tests/test_executor.py -q && uv run python -m pytest -q -m 'not requires_server'",
+      "notes": "Mock only: simulate/deviation assume mock kinematics (CARRY_Z, step increments per execute). MISSING/STALE feedback and the place/finish prechecks are unreachable under AgentLoop + mock (AgentLoop always returns world_state; deviation fires first) and are tested with synthetic messages or _ground directly. InvalidFault aborts the episode (no episode_end). A refused silent drop has already advanced step/t/execute_calls. A stop on the final allowed turn ends as max_steps (stop meta still traced). Faults do not check WORKSPACE bounds. LLM-extracted goals not connected; no Robosuite multi-object support."
     }
   ],
   "backlog": [
@@ -276,7 +292,7 @@
     {
       "id": "B006",
       "title": "Mock fault fixtures can create physically impossible states",
-      "status": "open",
+      "status": "resolved",
       "acceptance": [
         "silent_drop_on_place landing point respects cube non-overlap and region capacity (or the fixture refuses such configurations)",
         "perturb_at cannot move a cube onto another cube, put a second cube into a target_region, or move the held object while it is held",
@@ -284,12 +300,13 @@
       ],
       "verification": "pytest tests/test_clear_target.py tests/test_env.py -q",
       "blockers": "Must be resolved before F011b disturbance evaluations",
-      "notes": "Found in the F011a review: env.py applies perturb_at poses and the silent-drop landing point without occupancy checks; current test schedules do not trigger these cases."
+      "notes": "Found in the F011a review: env.py applies perturb_at poses and the silent-drop landing point without occupancy checks; current test schedules do not trigger these cases. Resolved in F012c: env.InvalidFault guards in MockTabletopEnv.execute/_place; tests in tests/test_executor.py (B006 section)."
     }
   ],
   "meta": {
     "last_updated": "2026-11-08",
     "baseline_commit": "45cd36b",
     "baseline_test_status": "non-server 225 passed, 17 skipped, 3 deselected (F012b-2); robosuite file 22 passed with ROBOT_AGENT_ROBOSUITE_PYTHON set; full suite with local Ollama 131 passed, 5 skipped (F010)"
-  }
+  },
+  "baseline_test_status": "non-server 280 passed, 17 skipped, 3 deselected (F012c); robosuite file 22 passed with ROBOT_AGENT_ROBOSUITE_PYTHON set; full suite with local Ollama 131 passed, 5 skipped (F010)"
 }

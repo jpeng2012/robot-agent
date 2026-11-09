@@ -1,5 +1,42 @@
 # Robot-Agent Development Progress
 
+## Session 2026-11-08: F012c — closed-loop symbolic plan execution and bounded replanning (mock), B006
+
+### Changes
+- src/robot_agent/executor.py (new): PlanExecutor, an LLMClient driven by the unchanged AgentLoop.
+- src/robot_agent/planner.py: `_apply` -> public `simulate(state, step)` with explicit InvalidStep; plan() maps a
+  rejection to PLANNER_INTERNAL/SIMULATE_REJECTED. Plans unchanged (parity 756 gates, same sequences).
+- src/robot_agent/env.py (B006): InvalidFault for perturbations/silent drops that would overlap a cube, overfill
+  a region, move a held, non-cube or unknown object; fail_once now honoured for place (as documented).
+- tests/test_executor.py (new, 55 tests).
+
+### Design decisions
+- Coordinates always from the newest delivered state; expected post-state = simulate(delivered, issued step).
+- Livelock = second replan from a physically identical state (deterministic planner => same plan), so every
+  unchanged-state non-transient failure gets exactly one re-attempt; checked before a replan is counted.
+- Missing/stale feedback costs one replan and an observe; never treated as success.
+- Executor goals passed separately from TaskSpec.goal; AgentLoop goal_check stays the only success authority.
+
+### Verification
+```bash
+uv run python -m pytest tests/test_executor.py -q            # 55 passed
+uv run python -m pytest -q -m "not requires_server"          # 280 passed, 17 skipped, 3 deselected
+ROBOT_AGENT_ROBOSUITE_PYTHON=~/miniconda3/envs/robot_policy/bin/python uv run python -m pytest tests/test_robosuite_env.py -q  # 22 passed
+uv run python f012b2_parity.py f012c_parity_v2               # 756 gates, all pass, sequences unchanged
+```
+- Mutation script (scratchpad, uncommitted): 26/26 mutants of executor/planner/env caught by test_executor.py.
+- Independent architecture and verification reviews: no blocking findings; should-fix items addressed
+  (position-dependent livelock, planner exception as llm_error, instance reuse, bounds on pick, weaker
+  advancement invariant / self-referential assertions).
+
+### Remaining limitations
+- Mock only; MISSING/STALE and place/finish prechecks reachable only via synthetic messages / _ground.
+- STATE_DEVIATION end-to-end only for a moved bystander cube; silent drop and moved-into-region surface as
+  execution failures (verify / env refusal) before the executor's own detection.
+- physical_violations oracle mirrors placement_conflict geometry; faults do not check WORKSPACE bounds.
+- InvalidFault aborts the episode without episode_end; refused silent drop already advanced step/t.
+- A stop emitted on the last allowed turn ends as max_steps.
+
 ## Session 2026-11-08: F011c–F012b-2 — Qwen3 multi-object evaluation, goal grounding, symbolic planner
 
 ### Evaluation-only work (uncommitted scripts in repo root; evidence gitignored under traces/)

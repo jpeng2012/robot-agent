@@ -1,6 +1,7 @@
 """Symbolic dependency planner for unordered in-region goals (F012b-2, mock backend only).
 
 plan(goals, state, bounds=WORKSPACE, max_physical=None) -> Plan | PlanningFailure
+simulate(state, step) -> WorldState  (the rollout transition, also used by executor.PlanExecutor)
 
 The planner never touches a RobotEnv: it rolls the dependency-aware step policy (policies.decide, aware=True)
 forward over a private copy of the given WorldState, using the mock's pick/place kinematics. Goals are validated
@@ -18,10 +19,10 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from robot_agent.env import CARRY_Z
+from robot_agent.env import CARRY_Z, GRASP_TOL
 from robot_agent.goals import InRegion
 from robot_agent import policies
-from robot_agent.world import REGION_HALF, WORKSPACE, WorldState, placement_conflict
+from robot_agent.world import REGION_HALF, WORKSPACE, GripperObs, Pose, WorldState, placement_conflict
 
 Bounds = tuple[float, float, float, float]
 
@@ -122,19 +123,46 @@ def validate(goals, state: WorldState) -> tuple[list[tuple[str, str]] | None, Pl
     return canonical, None
 
 
-def _apply(s: WorldState, step: PlanStep) -> WorldState:
-    """Mock kinematics (env.py) on a copy: pick lifts the cube at its pose to CARRY_Z; place sets it at (x, y, 0)."""
-    objs = {k: o.model_copy(deep=True) for k, o in s.objects.items()}
-    g = s.gripper.model_copy(deep=True)
+class InvalidStep(ValueError):
+    """simulate() was asked for a transition the mock could not execute successfully."""
+
+
+def simulate(state: WorldState, step: PlanStep) -> WorldState:
+    """The successful transition of one physical plan step under mock kinematics (env.py), on a copy.
+
+    pick lifts the cube to CARRY_Z at the commanded (x, y) and the gripper holds it there; place sets the
+    held cube at (x, y, 0) and releases it. Pure and deterministic; the input is never modified. Steps the
+    mock would reject (and finish, which has no physical effect) raise InvalidStep. This is the planner's
+    own rollout transition, so plans and executor predictions share one model.
+    """
+    g = state.gripper
+    if step.op not in ("pick", "place"):
+        raise InvalidStep(f"{step.op} has no physical transition")
+    if step.x is None or step.y is None:
+        raise InvalidStep(f"{step.op} needs x and y")
+    x, y = step.x, step.y
+    objs = {k: o.model_copy(deep=True) for k, o in state.objects.items()}
     if step.op == "pick":
-        o = objs[step.object_id]
-        o.pose = o.pose.model_copy(update={"z": CARRY_Z})
-        g = g.model_copy(update={"holding": step.object_id, "pose": o.pose.model_copy()})
+        oid = step.object_id
+        if g.holding is not None:
+            raise InvalidStep(f"pick {oid}: already holding {g.holding}")
+        if oid not in objs or objs[oid].kind != "cube":
+            raise InvalidStep(f"pick {oid!r}: not a known cube")
+        if objs[oid].pose.dist_xy(x, y) > GRASP_TOL:
+            raise InvalidStep(f"pick {oid}: ({x}, {y}) is more than GRASP_TOL from its pose")
+        objs[oid].pose = Pose(x=x, y=y, z=CARRY_Z)
+        grip = GripperObs(pose=Pose(x=x, y=y, z=CARRY_Z), holding=oid)
     else:
-        o = objs[g.holding]
-        o.pose = o.pose.model_copy(update={"x": step.x, "y": step.y, "z": 0.0})
-        g = g.model_copy(update={"holding": None, "pose": g.pose.model_copy(update={"x": step.x, "y": step.y})})
-    return s.model_copy(update={"objects": objs, "gripper": g, "step": s.step + 1})
+        held = g.holding
+        if held is None:
+            raise InvalidStep("place: gripper is empty")
+        if step.object_id is not None and step.object_id != held:
+            raise InvalidStep(f"place {step.object_id}: holding {held}")
+        if (why := placement_conflict(state, held, x, y)) is not None:
+            raise InvalidStep(f"place {held}: {why}")
+        objs[held].pose = Pose(x=x, y=y, z=0.0)
+        grip = GripperObs(pose=Pose(x=x, y=y, z=CARRY_Z), holding=None)
+    return state.model_copy(update={"objects": objs, "gripper": grip, "step": state.step + 1})
 
 
 def _prioritised(s: WorldState, base: list[InRegion]) -> list[InRegion]:
@@ -219,4 +247,7 @@ def plan(goals, state: WorldState, bounds: Bounds = WORKSPACE, max_physical: int
             else:
                 step = PlanStep(op="place", purpose="goal", object_id=held_now, region=goal_region[held_now], x=x, y=y)
         steps.append(step)
-        s = _apply(s, step)
+        try:
+            s = simulate(s, step)
+        except InvalidStep as e:  # defensive: decide() only proposes executable steps
+            return _fail(PlanningFailureCode.PLANNER_INTERNAL, str(e), "SIMULATE_REJECTED", steps=steps[:-1])

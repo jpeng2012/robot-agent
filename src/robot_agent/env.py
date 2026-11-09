@@ -31,13 +31,23 @@ class RobotEnv(Protocol):
     def execute(self, name: str, args: BaseModel) -> SkillOutcome: ...
 
 
+class InvalidFault(ValueError):
+    """A scheduled fault would create a physically impossible state (B006); the fixture is refused."""
+
+
 @dataclass
 class Faults:
-    """Deterministic, scheduled fault injection for the mock."""
+    """Deterministic, scheduled fault injection for the mock.
 
-    # skill name -> failure returned on the first call of that skill (consumed once)
+    Faults may only produce physically valid states (B006): a perturbation or silent-drop landing point
+    must respect cube non-overlap and region capacity (world.placement_conflict), and a held object is
+    never perturbed. Otherwise execute() raises InvalidFault instead of creating the state.
+    """
+
+    # skill name (pick or place) -> failure returned on the first call of that skill (consumed once);
+    # the scene is left as it was (a failed place keeps the cube held)
     fail_once: dict[str, FailureCode] = field(default_factory=dict)
-    # execute-call index -> (object id, x, y): object is moved just before that call runs
+    # execute-call index -> (cube id, x, y): the resting cube is moved just before that call runs
     perturb_at: dict[int, tuple[str, float, float]] = field(default_factory=dict)
     # first place reports ok, but the object actually lands at this xy (consumed once)
     silent_drop_on_place: tuple[float, float] | None = None
@@ -84,6 +94,8 @@ class MockTabletopEnv:
     def execute(self, name: str, args: BaseModel) -> SkillOutcome:
         if (p := self.faults.perturb_at.get(self.execute_calls)) is not None:
             oid, x, y = p
+            if (why := self._perturb_conflict(oid, x, y)) is not None:
+                raise InvalidFault(f"perturb_at[{self.execute_calls}] {oid} -> ({x}, {y}): {why}")
             self.poses[oid] = Pose(x=x, y=y)
         self.execute_calls += 1
         self.step += 1
@@ -124,12 +136,30 @@ class MockTabletopEnv:
         # perturbation inside execute) cannot produce overlapping cubes; the cube stays held.
         if (why := placement_conflict(self.observe(), self.holding, x, y)) is not None:
             return _fail(FailureCode.DESTINATION_OCCUPIED, why)
-        oid, self.holding = self.holding, None
-        self.gripper = Pose(x=x, y=y, z=CARRY_Z)
+        if (code := self._fail_once.pop("place", None)) is not None:
+            return _fail(code, f"place of {self.holding} failed (injected)")  # cube stays held
+        land = (x, y)
         if self._silent_drop is not None:
-            (x, y), self._silent_drop = self._silent_drop, None
-        self.poses[oid] = Pose(x=x, y=y)
+            land, self._silent_drop = self._silent_drop, None
+            if (why := placement_conflict(self.observe(), self.holding, *land)) is not None:
+                raise InvalidFault(f"silent_drop_on_place {land}: {why}")
+        oid, self.holding = self.holding, None
+        self.gripper = Pose(x=x, y=y, z=CARRY_Z)  # the gripper releases at the commanded point
+        self.poses[oid] = Pose(x=land[0], y=land[1])
         return SkillOutcome(ok=True)  # reports ok even after a silent drop
+
+    def _perturb_conflict(self, oid: str, x: float, y: float) -> str | None:
+        """Why moving `oid` to (x, y) would be physically impossible, or None (B006)."""
+        if oid not in self.kinds:
+            return f"unknown object {oid!r}"
+        if self.kinds[oid] != "cube":
+            return f"{oid!r} is a {self.kinds[oid]}; only cubes may be perturbed"
+        if oid == self.holding:
+            return f"{oid} is held"
+        s = self.observe()
+        if self.holding is not None:
+            del s.objects[self.holding]  # carried above the table, not an obstacle
+        return placement_conflict(s, oid, x, y)
 
 
 def _fail(code: FailureCode, detail: str) -> SkillOutcome:
