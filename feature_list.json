@@ -265,6 +265,19 @@
       ],
       "verification": "ROBOT_AGENT_ROBOSUITE_PYTHON=... uv run python -m pytest tests/test_robosuite_multi.py tests/test_robosuite_env.py -q && uv run python -m pytest -q -m 'not requires_server'",
       "notes": "One fixed layout and seed family; no staging, cycles or barrier navigation (planner staging is unaware of PLACE_CLEARANCE: a refused staging place would end in LIVELOCK_DETECTED). In the measured runs the carried pose stayed within mock tolerances, so PHYSICAL_TOLERANCES' held-pose relaxation was not exercised physically. Transit non-convergence guard untested (never triggered). Reproducibility measured within one worker process on one build. tests/test_executor.py signature assertion updated for the new tolerances keyword."
+    },
+    {
+      "id": "F016",
+      "title": "Physically safe staging for two-cube SWAP in Robosuite",
+      "status": "complete (pending commit approval)",
+      "acceptance": [
+        "policies._staging/decide, planner.plan and PlanExecutor take optional clearance (default 0: mock/CLEAR unchanged, parity 756/756): staging point >= clearance from every other cube and region centre, else NO_STAGING; executor prechecks every place against clearance - PLACE_TOL and replans instead of sending an unsafe place",
+        "Robosuite SWAP with clearance = place_clearance + PLACE_TOL = 0.11: goal_met, 6 skills, 0 failures, 0 replans, 0 refused places, staged at (-0.10, 0.08); same seed reproduced",
+        "Control without clearance: worker refuses blue's goal place (red staged 0.073 m from parking), executor stops LIVELOCK_DETECTED; tight bounds -> NO_STAGING with 0 env executions; staged red moved during blue's pick -> STATE_DEVIATION -> 1 replan -> goal_met in 6 skills",
+        "Test-only worker configure_test(transit_budget): transit budget 0 -> POSTCONDITION_FAILED 'pick not attempted', nothing touched; through AgentLoop 2 attempts then LIVELOCK_DETECTED"
+      ],
+      "verification": "ROBOT_AGENT_ROBOSUITE_PYTHON=... uv run python -m pytest -q -m 'not requires_server'",
+      "notes": "Review (no blocking) follow-ups not applied: one clearance value drives both staging (worker clearance + PLACE_TOL) and the place precheck (clearance - PLACE_TOL), consistent only at 0.11; worker reset does not check a cube inside one region against the other region's centre; tests do not pin the precheck's upper side, a goal-purpose precheck, or the cube half of the staging filter; control test could assert exactly 2 refusals; SWAP reproducibility omits eef pose; planner does not treat near-but-not-overlapping cubes as blockers (livelock stop on solvable disturbed states); zero worst-case margin at 0.11."
     }
   ],
   "backlog": [
@@ -352,7 +365,7 @@
   "meta": {
     "last_updated": "2026-11-08",
     "baseline_commit": "45cd36b",
-    "baseline_test_status": "full suite with ROBOT_AGENT_ROBOSUITE_PYTHON set: 316 passed, 1 skipped, 3 deselected (F015); robosuite single-cube file 22 passed; full suite with local Ollama 131 passed, 5 skipped (F010)",
+    "baseline_test_status": "full suite with ROBOT_AGENT_ROBOSUITE_PYTHON set: 324 passed, 1 skipped, 3 deselected (F016); full suite with local Ollama 131 passed, 5 skipped (F010)",
     "findings_doc": "docs/robot_agent_f011_f014_findings.md",
     "next_research_direction": "undecided: (1) language grounding with independent confirmation, (2) model learning for planning/grounding, (3) embodied multi-object execution"
   }

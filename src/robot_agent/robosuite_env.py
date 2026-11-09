@@ -38,6 +38,7 @@ class RobosuiteEnv:
         self.scene = scene
         self.backend_info: dict = {}
         self.test_perturb_at: dict[int, tuple[str, float, float]] = {}
+        self.test_transit_budget: int | None = None  # test-only: shrink the worker's transit budget
 
     def _rpc(self, op: str, **kw):
         try:
@@ -61,6 +62,8 @@ class RobosuiteEnv:
         state = WorldState.model_validate(self._rpc("reset", layout=task.layout, seed=seed))
         if self.test_perturb_at:
             self._rpc("schedule_perturb", schedule={str(k): list(v) for k, v in self.test_perturb_at.items()})
+        if self.test_transit_budget is not None:
+            self._rpc("configure_test", config={"transit_budget": self.test_transit_budget})
         self.backend_info = self._rpc("info")
         hx, hy = self.backend_info["target_half_size"]
         for g in task.goal:  # the goal's region must be the one the simulator draws and checks against

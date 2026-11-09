@@ -64,7 +64,39 @@ def test_physical_profile_resting_tolerances(blue, ok):
     assert (deviation(ws(), ws(blue=blue), PHYSICAL_TOLERANCES) is None) is ok
 
 
-# ------------------------------------------------------------------ simulator
+# ------------------------------------------------------------------ F016 staging clearance (mock state, no simulator)
+
+REACH = (-0.15, 0.15, -0.12, 0.36)
+SWAP_LAYOUT = {**TASK.layout, "cube_red": ("cube", *PARKING)}
+
+
+def mock_state(layout):
+    from robot_agent.env import MockTabletopEnv
+    return MockTabletopEnv().reset(TaskSpec(name="m", instruction="", layout=layout, goal=TASK.goal))
+
+
+def test_staging_clearance_is_threaded_through_the_planner():
+    from robot_agent.planner import Plan, plan
+    s = mock_state(SWAP_LAYOUT)
+    stage = lambda p: next((x.x, x.y) for x in p.steps if x.purpose == "stage")  # noqa: E731
+    assert stage(plan(TASK.goal, s, bounds=REACH)) == stage(plan(TASK.goal, s, bounds=REACH, clearance=0.0)) == (-0.1, 0.13)
+    p = plan(TASK.goal, s, bounds=REACH, clearance=0.11)
+    assert isinstance(p, Plan) and p.physical_actions == 6 and stage(p) == (-0.1, 0.08)
+    assert all(((stage(p)[0] - x) ** 2 + (stage(p)[1] - y) ** 2) ** 0.5 >= 0.11 for x, y in (TARGET, PARKING))
+    f = plan(TASK.goal, s, bounds=(-0.13, 0.13, 0.12, 0.28), clearance=0.11)
+    assert f.code == "NO_STAGING"
+
+
+def test_executor_prechecks_place_clearance():
+    from robot_agent.planner import PlanStep, simulate
+    s = mock_state(TASK.layout)
+    held = simulate(s, PlanStep(op="pick", purpose="goal", object_id="cube_red", x=RED0[0], y=RED0[1]))
+    near_blue = PlanStep(op="place", purpose="stage", object_id="cube_red", x=TARGET[0] - 0.085, y=TARGET[1])
+    assert "within 0.090 m of cube_blue" in PlanExecutor(TASK.goal, clearance=0.11)._ground(held, near_blue)
+    tc, _ = PlanExecutor(TASK.goal)._ground(held, near_blue)  # mock default: no physical clearance
+    assert tc.name == "place"
+
+
 
 sim = pytest.mark.skipif(not os.environ.get("ROBOT_AGENT_ROBOSUITE_PYTHON"), reason="ROBOT_AGENT_ROBOSUITE_PYTHON not set")
 
@@ -77,15 +109,16 @@ def env():
         yield e
 
 
-def run(env, tmp_path, perturb=None, seed=0):
-    env.test_perturb_at = dict(perturb or {})
+def run(env, tmp_path, perturb=None, seed=0, task=TASK, clearance=0.0, bounds=None, transit_budget=None):
+    env.test_perturb_at, env.test_transit_budget = dict(perturb or {}), transit_budget
     try:
-        env.reset(TASK, seed=seed)  # backend_info (reach) is per reset
-        ex = PlanExecutor(TASK.goal, bounds=tuple(env.backend_info["reach"]), tolerances=PHYSICAL_TOLERANCES)
+        env.reset(task, seed=seed)  # backend_info (reach) is per reset
+        ex = PlanExecutor(task.goal, bounds=bounds or tuple(env.backend_info["reach"]), tolerances=PHYSICAL_TOLERANCES,
+                          clearance=clearance)
         loop = AgentLoop(env, ex, trace_dir=tmp_path, max_turns=20)
-        r = loop.run(TASK, seed=seed)
+        r = loop.run(task, seed=seed)
     finally:
-        env.test_perturb_at = {}
+        env.test_perturb_at, env.test_transit_budget = {}, None
     return r, loop.tracer.events, ex
 
 
@@ -132,8 +165,9 @@ def common_checks(r, ev, env):
     for name, args, e in outcomes(ev):
         before = delivered_before(ev, e["seq"])
         handled = args["object_id"] if name == "pick" else before["gripper"]["holding"]
+        moved_by_test = (e["outcome"]["info"].get("test_perturbation") or {}).get("object_id")
         for c in ("cube_red", "cube_blue"):
-            if c != handled:
+            if c not in (handled, moved_by_test):
                 a, b = before["objects"][c]["pose"], e["state_after"]["objects"][c]["pose"]
                 assert max(abs(a[k] - b[k]) for k in "xyz") < 0.005, (name, c, a, b)
     # Every attempted pick started its approach above the commanded point at retreat height.
@@ -259,3 +293,112 @@ def test_reset_refuses_layouts_without_finger_clearance(env, layout_change, why)
     task = TASK.model_copy(update={"layout": {**TASK.layout, **layout_change}})
     with pytest.raises(RuntimeError, match=why):
         env.reset(task, seed=0)
+
+
+# ------------------------------------------------------------------ F016: SWAP with physical staging
+
+SWAP = TASK.model_copy(update={"name": "f016_two_cube_swap",
+                               "layout": {**TASK.layout, "cube_red": ("cube", *PARKING)}})
+
+
+def clearance(env):
+    return env.backend_info["place_clearance"] + 0.02  # worker finger clearance + PLACE_TOL margin
+
+
+def places(ev):
+    return [(a, e) for n, a, e in outcomes(ev) if n == "place"]
+
+
+@sim
+def test_swap_stages_with_physical_clearance_and_meets_goals(env, tmp_path):
+    env.reset(SWAP, seed=0)
+    c = clearance(env)
+    r, ev, ex = run(env, tmp_path, task=SWAP, clearance=c)
+    common_checks(r, ev, env)
+    assert r.failures == 0 and r.skills_executed == 6 and ex.replans == 0 and ex.plan_id == 0
+    assert [(n, a.get("object_id")) for n, a, _ in outcomes(ev)] == [
+        ("pick", "cube_red"), ("place", None), ("pick", "cube_blue"), ("place", None), ("pick", "cube_red"), ("place", None)]
+    assert all(e["outcome"]["ok"] for _, e in places(ev))  # zero refused (unsafe) place attempts
+    plan = next(t["meta"]["plan"] for t in of(ev, "llm_turn") if "plan" in t["meta"])
+    [stage] = [s for s in plan["steps"] if s["purpose"] == "stage"]
+    regions = [TARGET, PARKING]
+    assert all(((stage["x"] - x) ** 2 + (stage["y"] - y) ** 2) ** 0.5 >= c for x, y in regions)
+    lo = env.backend_info["reach"]
+    assert lo[0] <= stage["x"] <= lo[1] and lo[2] <= stage["y"] <= lo[3]
+    staged = of(ev, "tool_result")[2]["world_state"]["objects"]["cube_red"]["pose"]  # after the staging place
+    assert ((staged["x"] - stage["x"]) ** 2 + (staged["y"] - stage["y"]) ** 2) ** 0.5 <= 0.02
+
+
+@sim
+def test_swap_without_clearance_is_refused_by_the_worker_and_bounded(env, tmp_path):
+    # Control: mock staging (clearance 0) puts red 0.073 m from the parking centre; the worker refuses blue's
+    # goal place there, and the executor stops on livelock instead of retrying indefinitely.
+    r, ev, ex = run(env, tmp_path, task=SWAP, clearance=0.0)
+    assert not r.success and r.reason == "llm_stopped"
+    refused = [e for _, e in places(ev) if not e["outcome"]["ok"]]
+    assert refused and all(e["outcome"]["failure"]["code"] == "DESTINATION_OCCUPIED" for e in refused)
+    assert all(e["outcome"]["info"]["control_steps"] == 0 for e in refused) and len(refused) <= 2
+    stop = [t["meta"] for t in of(ev, "llm_turn") if t["meta"].get("mode") == "stop"][-1]
+    assert stop["executor_failure"]["code"] == "LIVELOCK_DETECTED"
+
+
+@sim
+def test_swap_same_seed_reproduces(env, tmp_path):
+    env.reset(SWAP, seed=0)
+    c = clearance(env)
+    runs = [run(env, tmp_path / str(i), task=SWAP, clearance=c) for i in range(2)]
+    assert all(r.success for r, _, _ in runs)
+    seqs = [[(n, a, e["outcome"]["ok"], e["outcome"]["info"]["cube_poses_world"]) for n, a, e in outcomes(ev)]
+            for _, ev, _ in runs]
+    finals = [of(ev, "episode_end")[-1]["state"] for _, ev, _ in runs]
+    assert len(seqs[0]) == 6 and seqs[0] == seqs[1] and finals[0] == finals[1]
+
+
+@sim
+def test_no_safe_staging_is_a_planning_failure_without_physical_commands(env, tmp_path):
+    env.reset(SWAP, seed=0)
+    tight = (-0.13, 0.13, 0.12, 0.28)  # every staging grid point is within the clearance of a region centre
+    r, ev, ex = run(env, tmp_path, task=SWAP, clearance=clearance(env), bounds=tight)
+    assert not r.success and r.reason == "llm_stopped" and of(ev, "env_outcome") == []
+    stop = [t["meta"] for t in of(ev, "llm_turn") if t["meta"].get("mode") == "stop"][-1]
+    assert stop["planning_failure"]["code"] == "NO_STAGING"
+
+
+@sim
+def test_disturbance_after_staging_is_detected_and_replanned(env, tmp_path):
+    env.reset(SWAP, seed=0)
+    moved = (0.05, -0.08)  # staged red is moved to another free, reachable, clear point during blue's pick
+    r, ev, ex = run(env, tmp_path, task=SWAP, clearance=clearance(env), perturb={2: ("cube_red", *moved)})
+    common_checks(r, ev, env)
+    out = outcomes(ev)
+    assert out[2][2]["outcome"]["ok"] and out[2][2]["outcome"]["info"]["test_perturbation"]["object_id"] == "cube_red"
+    [rr] = [t["meta"]["replan_reason"] for t in of(ev, "llm_turn") if "replan_reason" in t["meta"]]
+    assert (rr["trigger"], rr["step_index"]) == ("STATE_DEVIATION", 2) and "cube_red" in rr["detail"]
+    picks = [a for n, a, _ in out if n == "pick" and a["object_id"] == "cube_red"]
+    assert (picks[-1]["x"], picks[-1]["y"]) != (picks[0]["x"], picks[0]["y"])  # re-grounded at the moved pose
+    assert abs(picks[-1]["x"] - moved[0]) < 0.005 and abs(picks[-1]["y"] - moved[1]) < 0.005
+    assert ex.replans == 1 and r.failures == 0 and r.skills_executed == 6
+    assert all(e["outcome"]["ok"] for _, e in places(ev))
+
+
+@sim
+def test_transit_failure_is_bounded_and_fail_closed(env, tmp_path):
+    env.test_transit_budget = 0
+    try:
+        before = env.reset(TASK, seed=0)
+        out = env.execute("pick", PickArgs(object_id="cube_blue", x=TARGET[0], y=TARGET[1]))
+    finally:
+        env.test_transit_budget = None
+    info = out.info
+    assert not out.ok and out.failure.code == "POSTCONDITION_FAILED" and "pick not attempted" in out.failure.detail
+    assert (info["termination"], info["fsm_state"], info["transit_converged"]) == ("transit_budget", "TRANSIT", False)
+    after = env.observe()
+    assert after.gripper.holding is None
+    for c in ("cube_red", "cube_blue"):
+        a, b = before.objects[c].pose, after.objects[c].pose
+        assert max(abs(a.x - b.x), abs(a.y - b.y), abs(a.z - b.z)) < 1e-3  # nothing was touched
+    # Through AgentLoop the same refusal is bounded: one re-attempt, then an explicit executor stop.
+    r, ev, ex = run(env, tmp_path, transit_budget=0)
+    assert not r.success and r.reason == "llm_stopped" and len(of(ev, "env_outcome")) == 2
+    stop = [t["meta"] for t in of(ev, "llm_turn") if t["meta"].get("mode") == "stop"][-1]
+    assert stop["executor_failure"]["code"] == "LIVELOCK_DETECTED"

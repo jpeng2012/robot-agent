@@ -180,10 +180,13 @@ def _prioritised(s: WorldState, base: list[InRegion]) -> list[InRegion]:
     return [g for _, g in sorted(enumerate(base), key=key)]
 
 
-def plan(goals, state: WorldState, bounds: Bounds = WORKSPACE, max_physical: int | None = None) -> Plan | PlanningFailure:
+def plan(goals, state: WorldState, bounds: Bounds = WORKSPACE, max_physical: int | None = None,
+         clearance: float = 0.0) -> Plan | PlanningFailure:
     """Plan for unordered InRegion goals from an authoritative WorldState (not modified).
 
-    If every goal already holds, the plan is just finish, even while an unrelated cube is held."""
+    If every goal already holds, the plan is just finish, even while an unrelated cube is held.
+    clearance (default 0, mock): minimum staging distance from other cubes and region centres (policies._staging);
+    if no grid point qualifies the result is PlanningFailure NO_STAGING."""
     if max_physical is not None and max_physical < 0:
         raise ValueError("max_physical must be >= 0")
     held = state.gripper.holding
@@ -214,7 +217,7 @@ def plan(goals, state: WorldState, bounds: Bounds = WORKSPACE, max_physical: int
     s = state.model_copy(deep=True)
     steps: list[PlanStep] = []
     while True:
-        turn = policies.decide(s, _prioritised(s, base), aware=True, bounds=bounds)
+        turn = policies.decide(s, _prioritised(s, base), aware=True, bounds=bounds, clearance=clearance)
         if not turn.tool_calls:
             code = turn.meta.get("code")  # structured stop from the policy
             if code in POLICY_STOPS:

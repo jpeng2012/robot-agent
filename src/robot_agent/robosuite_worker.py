@@ -457,6 +457,7 @@ class TwoCubeBackend(Backend):
         self.step = 0
         self.execute_calls = 0
         self.perturb_at = {}
+        self.transit_budget = TRANSIT_BUDGET
         self.ctx = None
         return self.observe()
 
@@ -509,6 +510,12 @@ class TwoCubeBackend(Backend):
     def schedule_perturb(self, schedule):
         """Test-only: {execute index: [cube id, x, y]} for the current episode (cleared on reset)."""
         self.perturb_at = {int(k): (v[0], float(v[1]), float(v[2])) for k, v in schedule.items()}
+        return None
+
+    def configure_test(self, transit_budget=None):
+        """Test-only: shrink the transit step budget for the current episode (cleared on reset)."""
+        if transit_budget is not None:
+            self.transit_budget = int(transit_budget)
         return None
 
     def _perturb_conflict(self, oid, x, y):
@@ -564,7 +571,7 @@ class TwoCubeBackend(Backend):
             err = np.array([x - eef[0], y - eef[1], self.z_ref + RETREAT_Z - eef[2]])
             if np.hypot(err[0], err[1]) < TRANSIT_XY_TOL:
                 return n, True
-            if n >= TRANSIT_BUDGET:
+            if n >= self.transit_budget:
                 return n, False
             a = np.zeros(7, dtype=np.float32)
             a[:3] = np.clip(5.0 * err, -1.0, 1.0)
@@ -705,6 +712,10 @@ def main():
                 if not isinstance(backend, TwoCubeBackend):
                     raise ValueError("schedule_perturb is only supported by the two_cube scene")
                 result = backend.schedule_perturb(req["schedule"])
+            elif op == "configure_test":  # test-only (two_cube scene)
+                if not isinstance(backend, TwoCubeBackend):
+                    raise ValueError("configure_test is only supported by the two_cube scene")
+                result = backend.configure_test(**req["config"])
             elif op == "reset":
                 result = backend.reset(req["layout"], req.get("seed"))
             elif op == "observe":

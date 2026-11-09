@@ -44,14 +44,19 @@ def _staging_points(bounds: tuple[float, float, float, float] = WORKSPACE) -> li
     return [(x, y) for x in xs for y in ys]
 
 
-def _staging(s: WorldState, held: str,
-             bounds: tuple[float, float, float, float] = WORKSPACE) -> tuple[float, float] | None:
-    """Nearest free grid point (to the held cube's pre-pick xy) whose footprint is outside every region."""
+def _staging(s: WorldState, held: str, bounds: tuple[float, float, float, float] = WORKSPACE,
+             clearance: float = 0.0) -> tuple[float, float] | None:
+    """Nearest free grid point (to the held cube's pre-pick xy) whose footprint is outside every region.
+
+    clearance > 0 (physical backends, F016): the point must also be at least `clearance` from every other
+    cube's centre and every region centre, so neither this place nor later goal places crowd the gripper."""
     hx, hy = _xy(s, held)
     regions = [_xy(s, rid) for rid, o in s.objects.items() if o.kind == "target_region"]
+    others = [_xy(s, oid) for oid, o in s.objects.items() if o.kind == "cube" and oid != held]
     ok = [(x, y) for x, y in _staging_points(bounds)
           if all(abs(x - rx) >= STAGING_CLEARANCE or abs(y - ry) >= STAGING_CLEARANCE for rx, ry in regions)
-          and placement_conflict(s, held, x, y) is None]
+          and placement_conflict(s, held, x, y) is None
+          and all(((x - px) ** 2 + (y - py) ** 2) ** 0.5 >= clearance for px, py in [*regions, *others])]
     return min(ok, key=lambda p: (round(((p[0] - hx) ** 2 + (p[1] - hy) ** 2) ** 0.5, 6), p[0], p[1]), default=None)
 
 
@@ -79,7 +84,7 @@ def _act(name: str, mode: str, **args) -> AssistantTurn:
 
 
 def decide(s: WorldState | None, subgoals: list[InRegion], aware: bool,
-           bounds: tuple[float, float, float, float] = WORKSPACE) -> AssistantTurn:
+           bounds: tuple[float, float, float, float] = WORKSPACE, clearance: float = 0.0) -> AssistantTurn:
     if s is None:
         return _act("observe", "observe")
     if all(g.holds(s) for g in subgoals):
@@ -96,7 +101,7 @@ def decide(s: WorldState | None, subgoals: list[InRegion], aware: bool,
         if g is not None and placement_conflict(s, held, *_xy(s, g.region)) is None:
             x, y = _xy(s, g.region)
             return _act("place", "goal", x=x, y=y)
-        spot = _staging(s, held, bounds)
+        spot = _staging(s, held, bounds, clearance)
         if spot is None:
             return _text(f"no valid staging location for {held}", "NO_STAGING")
         return _act("place", "stage", x=spot[0], y=spot[1])

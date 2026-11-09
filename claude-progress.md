@@ -1,5 +1,16 @@
 # Robot-Agent Development Progress
 
+## Session 2026-11-08: F016 — physically safe staging for two-cube SWAP (Robosuite)
+
+- policies/planner/executor: optional `clearance` (default 0 keeps mock and CLEAR identical; parity 756/756).
+- Worker/adapter: test-only `configure_test(transit_budget)` / `test_transit_budget`.
+- tests/test_robosuite_multi.py: 2 unit + 6 simulator tests (SWAP nominal, no-clearance control, reproducibility,
+  NO_STAGING, disturbance after staging, transit fail-closed); tests/test_executor.py signature list + `clearance`.
+- Measured: SWAP goal_met in 6 skills, 0 failures/replans/refused places; control refused + LIVELOCK stop;
+  disturbance -> STATE_DEVIATION -> 1 replan -> goal_met; transit budget 0 -> bounded fail-closed.
+- Full suite with simulator: 324 passed, 1 skipped. Mutations (scratchpad): 7/7 caught.
+- Consolidated review: no blocking; should-fix follow-ups recorded in feature_list.json F016 notes.
+
 ## Session 2026-11-08: F015 — two-cube Robosuite manipulation with planner + PlanExecutor
 
 ### Changes
