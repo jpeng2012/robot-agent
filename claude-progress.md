@@ -1,5 +1,39 @@
 # Robot-Agent Development Progress
 
+## Session 2026-11-08: F011–F014 consolidation and milestone closure (documentation only)
+
+- Findings report: docs/robot_agent_f011_f014_findings.md (architecture evolution, result tables with denominators, failure examples,
+  observed vs interpreted, limitations, future directions). Every number checked against its saved source.
+- Closed: F012 end-to-end evaluation (complete), F013 and F014 (evaluation only; nothing promoted to src/).
+  Experimental scripts and traces stay uncommitted in the repo root / traces/.
+- Key results: trusted goals + planner + PlanExecutor solved every tested mock condition incl. one recovery;
+  language grounding remains open (Qwen3 never abstained in F014; F014's gain came from the deterministic
+  analysis, LLM added no measured value on the dev set).
+- Tracking fix: feature_list.json had a duplicate top-level baseline_test_status (added during F012c);
+  moved into meta.
+- Next research direction: undecided (language grounding with confirmation / model learning / embodied execution).
+
+## Session 2026-11-08: F014 evidence-grounded goal extraction (evaluation only, uncommitted)
+
+- f014_evidence.py, f014_items.json (author-written dev set, frozen sha c3ca82e2 before verifier/inference);
+  traces/f014_dryrun_v2 (150 gates), traces/f014_extract_v1 (66 Qwen3 calls, P-call isolation clean).
+- 0 accepted-wrong in arms A/B/C (60 items). F014dev coverage: A 1/17, B 14/17, C 14/17. Qwen3 never abstained
+  (0/18); every unauthorized proposal was blocked. Evidence spans always verbatim; bindings 67/92 supported.
+- Known verifier defect (frozen, not fixed): modal "should end up in"/"needs to go into" -> UNCLEAR_STRUCTURE.
+- Conclusion: coverage gain is from the deterministic analyser; the LLM adds no accepted coverage beyond arm C.
+
+## Session 2026-11-08: F012 end-to-end evaluation and F013 grounding check (evaluation only, uncommitted)
+
+- F012-eval (f012_e2e.py, traces/f012_e2e_v1, commit d253d73): 175 gates. PlanExecutor and the dependency-aware
+  policy reach goal_met with 0 excess actions and 0 rejections on S1-S5, SWAP, NO_SUBGOAL; frozen Qwen3 fails S2
+  and S3. Controlled valid recovery: STATE_DEVIATION -> new BFS-optimal plan -> gold goals met (1/3 replans);
+  max_replans=0 stops with REPLAN_BUDGET_EXHAUSTED. Limits: gold goals vs language; mock only; one recovery case.
+- F013 (f013_grounding.py, traces/f013_grounding_v1): closed restricted grammar + exact binding match; 104 gates.
+  Frozen F012a replies: 0 accepted wrong, 0 false rejections (N1/N4/N2/N3 clarify, Q1 extra goal rejected,
+  C1/C2 accepted then infeasible). Adversarial dev items: 0 accepted wrong, 2 contextual false rejections.
+  Closed as an evaluation milestone; parser NOT promoted to src/. Development set only, no held-out claim.
+- Rejected fault injections are not transactional (env step/t advance before InvalidFault); open.
+
 ## Session 2026-11-08: F012c — closed-loop symbolic plan execution and bounded replanning (mock), B006
 
 ### Changes

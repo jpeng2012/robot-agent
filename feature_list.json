@@ -219,6 +219,39 @@
       ],
       "verification": "uv run python -m pytest tests/test_executor.py -q && uv run python -m pytest -q -m 'not requires_server'",
       "notes": "Mock only: simulate/deviation assume mock kinematics (CARRY_Z, step increments per execute). MISSING/STALE feedback and the place/finish prechecks are unreachable under AgentLoop + mock (AgentLoop always returns world_state; deviation fires first) and are tested with synthetic messages or _ground directly. InvalidFault aborts the episode (no episode_end). A refused silent drop has already advanced step/t/execute_calls. A stop on the final allowed turn ends as max_steps (stop meta still traced). Faults do not check WORKSPACE bounds. LLM-extracted goals not connected; no Robosuite multi-object support."
+    },
+    {
+      "id": "F012-eval",
+      "title": "End-to-end comparison: reactive Qwen3 (frozen F011c) vs dependency-aware policy vs PlanExecutor (mock)",
+      "status": "complete (evaluation only)",
+      "acceptance": [
+        "f012_e2e.py (uncommitted) at d253d73; traces/f012_e2e_v1; 175 gates pass; no model calls; memory off; frozen F011c traces unchanged (tree sha) and re-scored identically",
+        "PlanExecutor and DA: goal_met with 0 excess actions and 0 rejections on S1-S5, SWAP, NO_SUBGOAL; Qwen3 fails S2 (max_steps) and S3 (failure_budget); N/A where no frozen Qwen3 data",
+        "Controlled recovery (CLEAR, blue moved back into target before red's pick): STATE_DEVIATION detected before any rejection, new BFS-optimal 5-action plan, gold goals met, 1/3 replans; max_replans=0 -> REPLAN_BUDGET_EXHAUSTED"
+      ],
+      "notes": "Executor gets trusted gold goals; Qwen3 had to interpret language; not a like-for-like model comparison. Deterministic arms are near-trivially rejection-free. Mock only; one recovery scenario. Consolidated in docs/robot_agent_f011_f014_findings.md."
+    },
+    {
+      "id": "F013",
+      "title": "Restricted-grammar instruction-grounding check for extracted goals (evaluation only)",
+      "status": "closed (evaluation only; parser not promoted to src/)",
+      "acceptance": [
+        "f013_grounding.py (uncommitted); traces/f013_grounding_v1; 104 gates pass; no model calls",
+        "Frozen F012a Qwen3 replies (28): 17 correct accepted, 4 contradictory accepted then INFEASIBLE_GOALS, 7 incorrect blocked (N1, N4 clarify; Q1 extra goal REJECT_UNSUPPORTED; N2, N3 clarify; A1 invalid), 0 false rejections, 0 accepted wrong",
+        "12 author-written adversarial items / 25 scripted proposals: 0 accepted wrong; false rejections X5 ('put it'), X6 ('where the blue cube is'); swapped bindings blocked; matched pairs order-invariant"
+      ],
+      "notes": "Closed-vocabulary grammar designed after seeing the F012a items (development set, not held out; no independent review). Fails closed on any out-of-grammar paraphrase. For in-grammar instructions the grammar alone yields the goals, so the LLM is redundant there. Kept as experimental artifacts only. Consolidated in docs/robot_agent_f011_f014_findings.md."
+    },
+    {
+      "id": "F014",
+      "title": "Evidence-grounded goal extraction (Qwen3 + deterministic evidence/binding verifier; evaluation only)",
+      "status": "closed (evaluation only)",
+      "acceptance": [
+        "f014_evidence.py + f014_items.json (26-item author-written development set, sha c3ca82e2, frozen before verifier and inference); traces/f014_dryrun_v2 (150 gates), traces/f014_extract_v1 (66 P-call-isolated calls, all isolation/journal checks pass, verifier sha unchanged across inference)",
+        "0 accepted-wrong in all arms (A F013 grammar, B Qwen3+verifier, C verifier analysis alone) over 60 items; F014dev gold-set coverage A 1/17, B 14/17, C 14/17",
+        "Qwen3 abstained 0/18 on should-abstain items (always proposed goals); verifier blocked 18/18; 92/92 evidence spans verbatim but 67/92 bindings supported"
+      ],
+      "notes": "Development set only (same author as verifier). Known frozen-verifier defect: modal constructions ('should end up in', 'needs to go into') rejected as UNCLEAR_STRUCTURE (P3r/P3b/X2/E04 false rejections); not fixed post hoc. Coverage gain comes from the deterministic analyser (B <= C by construction), not from the LLM. Consolidated in docs/robot_agent_f011_f014_findings.md."
     }
   ],
   "backlog": [
@@ -306,7 +339,8 @@
   "meta": {
     "last_updated": "2026-11-08",
     "baseline_commit": "45cd36b",
-    "baseline_test_status": "non-server 225 passed, 17 skipped, 3 deselected (F012b-2); robosuite file 22 passed with ROBOT_AGENT_ROBOSUITE_PYTHON set; full suite with local Ollama 131 passed, 5 skipped (F010)"
-  },
-  "baseline_test_status": "non-server 280 passed, 17 skipped, 3 deselected (F012c); robosuite file 22 passed with ROBOT_AGENT_ROBOSUITE_PYTHON set; full suite with local Ollama 131 passed, 5 skipped (F010)"
+    "baseline_test_status": "non-server 280 passed, 17 skipped, 3 deselected (F012c); robosuite file 22 passed with ROBOT_AGENT_ROBOSUITE_PYTHON set; full suite with local Ollama 131 passed, 5 skipped (F010)",
+    "findings_doc": "docs/robot_agent_f011_f014_findings.md",
+    "next_research_direction": "undecided: (1) language grounding with independent confirmation, (2) model learning for planning/grounding, (3) embodied multi-object execution"
+  }
 }
